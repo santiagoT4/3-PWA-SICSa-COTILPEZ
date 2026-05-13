@@ -356,7 +356,6 @@
     try {
       const resultado = await llamarAPI('getData');
       
-      // Verificar si la respuesta es válida (puede venir con success o directamente los datos)
       if (resultado.success !== false) {
         state.productos = resultado.productos || [];
         state.clientes = resultado.clientes || [];
@@ -832,7 +831,6 @@
     `;
   }
 
-  // ============ FUNCIÓN CORREGIDA DE PEDIDOS ============
   function filtrarOrdenarPedidos() {
     let pedidosFiltrados = [...state.pedidos];
     
@@ -954,7 +952,6 @@
     `;
   }
 
-  // ============ FUNCIÓN CORREGIDA DE TRANSACCIONES ============
   function filtrarOrdenarTransacciones() {
     let transaccionesFiltradas = [...state.pedidos.filter(p => p.estado === 'Confirmado')];
     
@@ -1506,6 +1503,19 @@
     state.filtroTransacciones = { vendedor, orden, tipoFiltro: tipo, fechaInicio, fechaFin };
     render();
   };
+
+  // ============ EXPONER FUNCIONES CRÍTICAS AL SCOPE GLOBAL ============
+  // Estas funciones son llamadas desde los onclick del HTML
+  window.confirmarPedido = confirmarPedido;
+  window.eliminarPedidoDesdeEdicion = eliminarPedidoDesdeEdicion;
+  window.guardarNuevoNumeroInicial = guardarNuevoNumeroInicial;
+  window.saveNewClient = saveNewClient;
+  window.completeSale = completeSale;
+  window.guardarEdicionPedido = guardarEdicionPedido;
+  window.conectarImpresora = conectarImpresora;
+  window.mostrarOpcionesImpresion = mostrarOpcionesImpresion;
+  window.imprimirPedidoBluetooth = imprimirPedidoBluetooth;
+  window.imprimirPedidoNormal = imprimirPedidoNormal;
 
   // ============ MODALES ============
   function renderEditOrderModal() {
