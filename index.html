@@ -1,0 +1,2072 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#0f766e">
+  <title>Cotilpez POS - Kyte</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    * { font-family: 'Inter', sans-serif; }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    button:active { transform: scale(0.97); transition: transform 0.05s; }
+    button:disabled { opacity: 0.6; transform: none; cursor: not-allowed; }
+    @media print {
+      body * { visibility: hidden; }
+      .print-area, .print-area * { visibility: visible; }
+      .print-area { position: absolute; top: 0; left: 0; width: 100%; }
+    }
+    input, textarea, select {
+      font-size: 16px !important;
+    }
+    .search-dropdown {
+      position: absolute;
+      z-index: 1000;
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1);
+      max-height: 250px;
+      overflow-y: auto;
+      width: 100%;
+    }
+    .spinner {
+      border: 2px solid #f3f3f3;
+      border-top: 2px solid #0f766e;
+      border-radius: 50%;
+      width: 16px;
+      height: 16px;
+      animation: spin 1s linear infinite;
+      display: inline-block;
+      margin-right: 8px;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    .bluetooth-connected {
+      background: #10b981;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0% { opacity: 1; }
+      50% { opacity: 0.7; }
+      100% { opacity: 1; }
+    }
+  </style>
+</head>
+<body class="bg-gray-100">
+
+<div id="app" class="min-h-screen"></div>
+
+<script>
+  // ============ CONFIGURACIÓN - CAMBIA ESTA URL DESPUÉS DE DESPLEGAR ============
+  // IMPORTANTE: Reemplaza con la URL de tu Apps Script DESPUÉS de desplegar con CORS
+  const API_URL = 'https://script.google.com/macros/s/AKfycbzd06VKfiIBkmQagJcFGuqBSG2iUmZ6vnKeTrqzeuC7FNKNgiSNZpVs-NCoJ3gzYi9Bng/exec';
+  // ============================================================================
+
+  // ============ SISTEMA DE IMPRESIÓN BLUETOOTH PARA DPP-350C ============
+  class ImpresoraDPP350C {
+    constructor() {
+      this.device = null;
+      this.characteristic = null;
+      this.conectado = false;
+      this.nombreImpresora = null;
+    }
+    
+    async conectar() {
+      try {
+        this.device = await navigator.bluetooth.requestDevice({
+          filters: [
+            { namePrefix: 'DPP-350' },
+            { namePrefix: 'DATECS' },
+            { namePrefix: 'BT' }
+          ],
+          optionalServices: ['000018f0-0000-1000-8000-00805f9b34fb']
+        });
+        
+        this.nombreImpresora = this.device.name;
+        const server = await this.device.gatt.connect();
+        const service = await server.getPrimaryService('000018f0-0000-1000-8000-00805f9b34fb');
+        this.characteristic = await service.getCharacteristic('00002af1-0000-1000-8000-00805f9b34fb');
+        
+        this.conectado = true;
+        localStorage.setItem('impresoraDPP', JSON.stringify({
+          id: this.device.id,
+          name: this.device.name
+        }));
+        
+        return true;
+      } catch (error) {
+        console.error('Error de conexión:', error);
+        throw error;
+      }
+    }
+    
+    async reconectar() {
+      const guardada = localStorage.getItem('impresoraDPP');
+      if (guardada) {
+        try {
+          const { id } = JSON.parse(guardada);
+          const devices = await navigator.bluetooth.getDevices();
+          const device = devices.find(d => d.id === id);
+          if (device) {
+            const server = await device.gatt.connect();
+            const service = await server.getPrimaryService('000018f0-0000-1000-8000-00805f9b34fb');
+            this.characteristic = await service.getCharacteristic('00002af1-0000-1000-8000-00805f9b34fb');
+            this.device = device;
+            this.conectado = true;
+            this.nombreImpresora = device.name;
+            return true;
+          }
+        } catch (error) {
+          console.log('Reconexión fallida:', error);
+        }
+      }
+      return false;
+    }
+    
+    formatearFecha(fechaStr) {
+      if (!fechaStr) return 'Sin fecha';
+      const fecha = new Date(fechaStr);
+      const year = fecha.getFullYear();
+      const month = String(fecha.getMonth() + 1).padStart(2, '0');
+      const day = String(fecha.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+    
+    formatearHora(fechaStr) {
+      if (!fechaStr) return 'Sin hora';
+      const fecha = new Date(fechaStr);
+      const hours = String(fecha.getHours()).padStart(2, '0');
+      const minutes = String(fecha.getMinutes()).padStart(2, '0');
+      return `${hours}:${minutes}`;
+    }
+    
+    async imprimirFactura(order, detalles) {
+      if (!this.conectado) {
+        await this.conectar();
+      }
+      
+      const encoder = new TextEncoder();
+      let buffer = [];
+      
+      const ESC = '\x1B';
+      const GS = '\x1D';
+      
+      buffer.push(encoder.encode(ESC + '@'));
+      buffer.push(encoder.encode('═'.repeat(48) + '\n'));
+      buffer.push(encoder.encode(ESC + 'a' + '\x01'));
+      buffer.push(encoder.encode('COTILPEZ S.A.S.\n'));
+      buffer.push(encoder.encode('NIT: 900.000.000-0\n'));
+      buffer.push(encoder.encode('════════════════════════════════════════════\n'));
+      
+      const facturaNumero = order.numero_factura || order.id_pedido;
+      buffer.push(encoder.encode('FACTURA #' + facturaNumero + '\n'));
+      buffer.push(encoder.encode('FECHA: ' + this.formatearFecha(order.fecha) + '\n'));
+      buffer.push(encoder.encode('HORA: ' + this.formatearHora(order.fecha) + '\n'));
+      buffer.push(encoder.encode('════════════════════════════════════════════\n'));
+      
+      buffer.push(encoder.encode(ESC + 'a' + '\x00'));
+      buffer.push(encoder.encode('CLIENTE: ' + (order.nombre_cliente || 'Consumidor Final') + '\n'));
+      buffer.push(encoder.encode('VENDEDOR: ' + (order.nombre_vendedor || 'Admin') + '\n'));
+      buffer.push(encoder.encode('────────────────────────────────────────────────\n'));
+      buffer.push(encoder.encode('CANT  PRODUCTO                    TOTAL\n'));
+      buffer.push(encoder.encode('────────────────────────────────────────────────\n'));
+      
+      for (const item of detalles) {
+        const cantidad = item.cantidad.toString().padStart(4);
+        let nombre = item.nombre_producto;
+        if (nombre.length > 20) nombre = nombre.substring(0, 18) + '..';
+        const precioTotal = '$' + item.subtotal.toLocaleString();
+        
+        let linea = cantidad + '  ' + nombre;
+        let espacios = 48 - linea.length - precioTotal.length;
+        if (espacios < 1) espacios = 1;
+        linea += ' '.repeat(espacios) + precioTotal;
+        buffer.push(encoder.encode(linea + '\n'));
+      }
+      
+      buffer.push(encoder.encode('────────────────────────────────────────────────\n'));
+      buffer.push(encoder.encode(ESC + 'a' + '\x02'));
+      buffer.push(encoder.encode('TOTAL: $' + order.total.toLocaleString() + '\n'));
+      buffer.push(encoder.encode(ESC + 'a' + '\x00'));
+      buffer.push(encoder.encode('════════════════════════════════════════════\n'));
+      buffer.push(encoder.encode(ESC + 'a' + '\x01'));
+      buffer.push(encoder.encode('¡GRACIAS POR SU COMPRA!\n'));
+      buffer.push(encoder.encode('\n\n'));
+      buffer.push(encoder.encode(GS + 'V' + '\x41' + '\x00'));
+      
+      let totalLength = buffer.reduce((sum, arr) => sum + arr.length, 0);
+      let result = new Uint8Array(totalLength);
+      let offset = 0;
+      for (let arr of buffer) {
+        result.set(arr, offset);
+        offset += arr.length;
+      }
+      
+      await this.characteristic.writeValue(result);
+      return true;
+    }
+    
+    desconectar() {
+      if (this.device && this.device.gatt.connected) {
+        this.device.gatt.disconnect();
+      }
+      this.conectado = false;
+    }
+  }
+  
+  const impresora = new ImpresoraDPP350C();
+  
+  // Estado global
+  let state = {
+    user: null,
+    productos: [],
+    clientes: [],
+    pedidos: [],
+    detalles_pedido: [],
+    transacciones: [],
+    estadisticas: [],
+    usuarios: [],
+    configNumeracion: { ultimoNumero: 1000 },
+    loading: true,
+    activeTab: 'inicio',
+    cart: [],
+    selectedProduct: null,
+    numValue: '0',
+    showCart: false,
+    showPayment: false,
+    selectedClient: null,
+    selectedClientName: '',
+    searchProductText: '',
+    searchClientTextVender: '',
+    searchClientTextClientes: '',
+    selectedCategory: 'TODOS',
+    editingCartIndex: null,
+    editQuantityValue: '',
+    showOrderDetail: false,
+    selectedOrderId: null,
+    showClientHistory: false,
+    selectedClientForHistory: null,
+    showNewClientModal: false,
+    newClientName: '',
+    newClientPhone: '',
+    observacion: '',
+    showPrintModal: false,
+    lastOrderData: null,
+    showEditOrderModal: false,
+    editingOrder: null,
+    editingOrderDetails: [],
+    editingOrderOldData: null,
+    editCart: [],
+    editSelectedProduct: null,
+    editNumValue: '0',
+    editObservacion: '',
+    editSelectedClient: null,
+    showEditQuantityModal: false,
+    editingEditCartIndex: null,
+    showConfigNumeracionModal: false,
+    nuevoNumeroInicial: '',
+    impresoraConectada: false,
+    nombreImpresora: null,
+    loadingButtons: {
+      registrarVenta: false,
+      editarPedido: false,
+      eliminarPedido: false,
+      confirmarPedido: false,
+      actualizarNumeracion: false,
+      conectarImpresora: false
+    },
+    filtroPedidos: {
+      vendedor: 'TODOS',
+      fechaInicio: '',
+      fechaFin: '',
+      tipoFiltro: 'ninguno',
+      orden: 'fecha_desc'
+    },
+    filtroTransacciones: {
+      vendedor: 'TODOS',
+      fechaInicio: '',
+      fechaFin: '',
+      tipoFiltro: 'ninguno',
+      orden: 'fecha_desc'
+    }
+  };
+
+  function formatFecha(fecha) {
+    if (!fecha) return 'Sin fecha';
+    if (typeof fecha === 'string') {
+      return fecha.replace('T', ' ');
+    }
+    if (fecha instanceof Date) {
+      const year = fecha.getFullYear();
+      const month = String(fecha.getMonth() + 1).padStart(2, '0');
+      const day = String(fecha.getDate()).padStart(2, '0');
+      const hours = String(fecha.getHours()).padStart(2, '0');
+      const minutes = String(fecha.getMinutes()).padStart(2, '0');
+      return `${year}-${month}-${day} ${hours}:${minutes}`;
+    }
+    return String(fecha);
+  }
+
+  function getNumeroFactura(pedido) {
+    return pedido.numero_factura || pedido.id_pedido;
+  }
+
+  // ============ FUNCIÓN CORREGIDA DE COMUNICACIÓN CON APPS SCRIPT ============
+  async function llamarAPI(accion, payload = null) {
+    try {
+      const body = { accion };
+      if (payload) body.payload = payload;
+      
+      // CRÍTICO: Usar text/plain para evitar el preflight de CORS
+      // y redirect: 'follow' para seguir la redirección de Google
+      const respuesta = await fetch(API_URL, {
+        method: 'POST',
+        redirect: 'follow',
+        headers: { 
+          'Content-Type': 'text/plain;charset=utf-8'
+        },
+        body: JSON.stringify(body)
+      });
+      
+      // Verificar si la respuesta es válida
+      if (!respuesta.ok) {
+        throw new Error(`HTTP ${respuesta.status}: ${respuesta.statusText}`);
+      }
+      
+      // Obtener el texto de respuesta y parsear JSON
+      const textoRespuesta = await respuesta.text();
+      if (!textoRespuesta || textoRespuesta.trim() === '') {
+        return { success: false, error: 'Respuesta vacía del servidor' };
+      }
+      
+      const datos = JSON.parse(textoRespuesta);
+      return datos;
+      
+    } catch (error) {
+      console.error('Error en llamada API:', error);
+      console.error('Acción:', accion);
+      console.error('Payload:', payload);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async function refreshData() {
+    state.loading = true;
+    render();
+    
+    try {
+      const resultado = await llamarAPI('getData');
+      
+      if (resultado.success === true || resultado.success !== false) {
+        state.productos = resultado.productos || [];
+        state.clientes = resultado.clientes || [];
+        state.pedidos = (resultado.pedidos || []).sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+        state.detalles_pedido = resultado.detalles_pedido || [];
+        state.transacciones = resultado.transacciones || [];
+        state.estadisticas = resultado.estadisticas || [];
+        state.usuarios = resultado.usuarios || [];
+        state.configNumeracion = resultado.configNumeracion || { ultimoNumero: 1000 };
+        console.log('✅ Datos cargados correctamente:', {
+          productos: state.productos.length,
+          clientes: state.clientes.length,
+          pedidos: state.pedidos.length
+        });
+      } else {
+        console.error('Error en respuesta:', resultado);
+        alert('Error al cargar datos: ' + (resultado.error || 'Desconocido'));
+      }
+    } catch (error) {
+      console.error('Error en refreshData:', error);
+      alert('Error de conexión: ' + error.message);
+    }
+    
+    state.loading = false;
+    render();
+    setTimeout(autoReconectarImpresora, 2000);
+  }
+
+  // ============ FUNCIONES DE IMPRESIÓN BLUETOOTH ============
+  async function conectarImpresora() {
+    if (state.loadingButtons.conectarImpresora) return;
+    state.loadingButtons.conectarImpresora = true;
+    render();
+    
+    try {
+      const conectado = await impresora.reconectar();
+      if (!conectado) {
+        await impresora.conectar();
+      }
+      state.impresoraConectada = true;
+      state.nombreImpresora = impresora.nombreImpresora;
+      alert(`✅ Impresora ${state.nombreImpresora} conectada`);
+    } catch (error) {
+      alert('❌ Error al conectar: ' + error.message);
+      state.impresoraConectada = false;
+    } finally {
+      state.loadingButtons.conectarImpresora = false;
+      render();
+    }
+  }
+  
+  async function imprimirPedidoBluetooth(orderId) {
+    if (!state.impresoraConectada) {
+      const conectar = confirm('La impresora no está conectada. ¿Conectar ahora?');
+      if (conectar) {
+        await conectarImpresora();
+        if (!state.impresoraConectada) return;
+      } else {
+        return;
+      }
+    }
+    
+    try {
+      const resultado = await llamarAPI('getPedidoCompleto', { pedidoId: orderId });
+      if (!resultado.success && !resultado.order) throw new Error('Pedido no encontrado');
+      
+      await impresora.imprimirFactura(resultado.order, resultado.details);
+      alert('✅ Factura enviada a la impresora');
+    } catch (error) {
+      alert('❌ Error al imprimir: ' + error.message);
+      state.impresoraConectada = false;
+    }
+  }
+  
+  function imprimirPedidoNormal(orderId) {
+    const order = state.pedidos.find(p => p.id_pedido === orderId);
+    const detalles = state.detalles_pedido.filter(d => d.id_pedido === orderId);
+    if (order && detalles) {
+      state.lastOrderData = { order, detalles };
+      state.showPrintModal = true;
+      render();
+    }
+  }
+  
+  function mostrarOpcionesImpresion(orderId) {
+    const isAndroid = /Android/i.test(navigator.userAgent);
+    if (isAndroid) {
+      const opcion = confirm('🖨️ Opciones de impresión:\n\n✓ Aceptar → Bluetooth (DPP-350C)\n✓ Cancelar → Impresión normal');
+      if (opcion) {
+        imprimirPedidoBluetooth(orderId);
+      } else {
+        imprimirPedidoNormal(orderId);
+      }
+    } else {
+      imprimirPedidoNormal(orderId);
+    }
+  }
+  
+  async function autoReconectarImpresora() {
+    if (/Android/i.test(navigator.userAgent)) {
+      try {
+        const conectado = await impresora.reconectar();
+        if (conectado) {
+          state.impresoraConectada = true;
+          state.nombreImpresora = impresora.nombreImpresora;
+        }
+      } catch (error) {}
+      render();
+    }
+  }
+
+  // ============ FUNCIONES DE NEGOCIO ============
+  async function confirmarPedido(id) {
+    if (confirm('¿Confirmar este pedido?')) {
+      setButtonLoading('confirmarPedido', true);
+      const resultado = await llamarAPI('confirmarPedido', { pedidoId: id });
+      setButtonLoading('confirmarPedido', false);
+      if (resultado.success) {
+        await refreshData();
+        alert('Pedido confirmado exitosamente');
+      } else {
+        alert('Error al confirmar: ' + (resultado.error || 'Desconocido'));
+      }
+    }
+  }
+  
+  async function eliminarPedidoDesdeEdicion(pedidoId) {
+    if (confirm('⚠️ ¿Estás seguro de que quieres ELIMINAR este pedido?\n\nEsta acción no se puede deshacer.\n¿Continuar?')) {
+      setButtonLoading('eliminarPedido', true);
+      const resultado = await llamarAPI('eliminarPedido', pedidoId);
+      setButtonLoading('eliminarPedido', false);
+      if (resultado.success) {
+        alert('✅ Pedido eliminado exitosamente');
+        closeEditOrderModal();
+        await refreshData();
+      } else {
+        alert('❌ Error al eliminar: ' + (resultado.error || 'Desconocido'));
+      }
+    }
+  }
+  
+  async function guardarNuevoNumeroInicial() {
+    const nuevoNumero = parseInt(document.getElementById('modalNuevoNumero')?.value);
+    if (!nuevoNumero || nuevoNumero <= 0) {
+      alert('Por favor ingresa un número válido');
+      return;
+    }
+    
+    setButtonLoading('actualizarNumeracion', true);
+    const resultado = await llamarAPI('actualizarNumeracion', { numero: nuevoNumero });
+    setButtonLoading('actualizarNumeracion', false);
+    
+    if (resultado.success) {
+      alert(`✅ Número inicial actualizado a: ${resultado.nuevoNumero}\nLa próxima factura será: ${resultado.nuevoNumero}`);
+      cerrarModalConfiguracionNumeracion();
+      await refreshData();
+    } else {
+      alert('Error al actualizar: ' + (resultado.error || 'Desconocido'));
+    }
+  }
+  
+  async function saveNewClient() {
+    const name = document.getElementById('newClientName')?.value;
+    const phone = document.getElementById('newClientPhone')?.value;
+    if (name) {
+      const resultado = await llamarAPI('crearCliente', { nombre: name, telefono: phone });
+      if (resultado.success) {
+        await refreshData();
+        closeNewClientModal();
+      } else {
+        alert('Error al crear cliente');
+      }
+    } else {
+      alert('Ingrese un nombre');
+    }
+  }
+  
+  async function completeSale() {
+    const cartTotal = state.cart.reduce((s, i) => s + ((i.unitPrice || i.product.precio) * i.quantity), 0);
+    const observacionFinal = document.getElementById('observacionFinal')?.value || state.observacion;
+    
+    let clientId = 'N/A', clientName = 'Consumidor Final';
+    if (state.selectedClient) {
+      clientId = state.selectedClient.id;
+      clientName = state.selectedClient.nombre;
+    }
+    
+    const order = { 
+      fecha: '',
+      id_cliente: clientId, 
+      nombre_cliente: clientName,
+      id_vendedor: state.user?.id || '1', 
+      nombre_vendedor: state.user?.nombre || 'Admin', 
+      total: cartTotal, 
+      estado: 'Pendiente',
+      observacion: observacionFinal
+    };
+    
+    const details = state.cart.map((item, idx) => ({ 
+      id_detail: 'TEMP-' + Date.now() + '-' + idx,
+      id_pedido: 'TEMPORAL',
+      codigo_producto: item.product.código, 
+      nombre_producto: item.product.nombre, 
+      cantidad: item.quantity, 
+      precio_unitario: item.unitPrice || item.product.precio,
+      subtotal: (item.unitPrice || item.product.precio) * item.quantity 
+    }));
+    
+    setButtonLoading('registrarVenta', true);
+    
+    const resultado = await llamarAPI('registrarVenta', { order, details });
+    
+    setButtonLoading('registrarVenta', false);
+    
+    if (resultado.success) {
+      state.cart = []; 
+      state.showPayment = false; 
+      state.selectedClient = null;
+      state.selectedClientName = '';
+      state.observacion = '';
+      await refreshData(); 
+      alert(`✅ Venta registrada con Factura #${resultado.numeroFactura}\nID Pedido: ${resultado.orderId}\nEl pedido está pendiente de confirmación.`);
+    } else {
+      alert('Error al registrar: ' + (resultado.error || 'Desconocido'));
+    }
+  }
+  
+  async function guardarEdicionPedido() {
+    if (state.editCart.length === 0) {
+      alert('El pedido debe tener al menos un producto');
+      return;
+    }
+    
+    const newTotal = state.editCart.reduce((s, i) => s + ((i.unitPrice || i.product.precio) * i.quantity), 0);
+    const clienteId = state.editSelectedClient?.id || state.editingOrder.id_cliente;
+    const clienteNombre = state.editSelectedClient?.nombre || state.editingOrder.nombre_cliente;
+    const observacion = document.getElementById('editObservacionOrder')?.value || state.editObservacion;
+    
+    const updatedOrder = {
+      ...state.editingOrder,
+      id_cliente: clienteId,
+      nombre_cliente: clienteNombre,
+      total: newTotal,
+      observacion: observacion
+    };
+    
+    const newDetails = state.editCart.map((item, idx) => ({
+      id_detail: `${state.editingOrder.id_pedido}-${idx}-${Date.now()}`,
+      id_pedido: state.editingOrder.id_pedido,
+      codigo_producto: item.product.código,
+      nombre_producto: item.product.nombre,
+      cantidad: item.quantity,
+      precio_unitario: item.unitPrice || item.product.precio,
+      subtotal: (item.unitPrice || item.product.precio) * item.quantity
+    }));
+    
+    const payload = {
+      orderId: state.editingOrder.id_pedido,
+      order: updatedOrder,
+      details: newDetails,
+      oldDetails: state.editingOrderDetails,
+      oldOrder: state.editingOrder
+    };
+    
+    setButtonLoading('editarPedido', true);
+    
+    const resultado = await llamarAPI('editarPedido', payload);
+    
+    setButtonLoading('editarPedido', false);
+    
+    if (resultado.success) {
+      alert('✅ Pedido editado exitosamente');
+      await refreshData();
+      closeEditOrderModal();
+    } else {
+      alert('Error al guardar: ' + (resultado.error || 'Desconocido'));
+    }
+  }
+
+  // ============ FUNCIONES DE RENDER ============
+  function setButtonLoading(buttonName, isLoading) {
+    state.loadingButtons[buttonName] = isLoading;
+    render();
+  }
+
+  function render() {
+    const app = document.getElementById('app');
+    if (state.loading) {
+      app.innerHTML = `<div class="flex flex-col items-center justify-center min-h-screen gap-4"><div class="w-12 h-12 border-4 border-teal-600 border-t-transparent rounded-full animate-spin"></div><p class="text-gray-600 font-medium">Cargando Cotilpez POS...</p></div>`;
+      return;
+    }
+    if (!state.user) renderLogin();
+    else renderMainApp();
+  }
+
+  function renderLogin() {
+    const activeUsers = state.usuarios.filter(u => u.activo === true);
+    document.getElementById('app').innerHTML = `
+      <div class="flex items-center justify-center min-h-screen bg-gray-100 p-4">
+        <div class="w-full max-w-md bg-white rounded-2xl p-8 shadow-xl">
+          <div class="text-center mb-8">
+            <div class="w-16 h-16 bg-teal-600 rounded-2xl flex items-center justify-center mx-auto mb-4"><span class="text-white font-bold text-2xl">CP</span></div>
+            <h1 class="text-2xl font-bold text-gray-800">Cotilpez S.A.S.</h1>
+            <p class="text-gray-500 text-sm">Punto de Venta</p>
+          </div>
+          <select id="loginUser" class="w-full border border-gray-300 rounded-xl p-3 mb-4 text-center bg-white">
+            <option value="">-- Selecciona un usuario --</option>
+            ${activeUsers.map(u => `<option value="${u.email}">${u.nombre} (${u.rol})</option>`).join('')}
+          </select>
+          <button onclick="handleLogin()" class="w-full bg-teal-600 text-white py-3 rounded-xl font-bold text-lg">Ingresar</button>
+          <p class="text-xs text-gray-400 text-center mt-4">📦 ${state.productos.length} productos | 👥 ${state.clientes.length} clientes</p>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderMainApp() {
+    const tabs = [
+      { id: 'inicio', label: 'Inicio', icon: '🏠' },
+      { id: 'vender', label: 'Vender', icon: '🛒' },
+      { id: 'pedidos', label: 'Pedidos', icon: '📋' },
+      { id: 'clientes', label: 'Clientes', icon: '👥' },
+      { id: 'productos', label: 'Productos', icon: '📦' },
+      { id: 'transacciones', label: 'Transacciones', icon: '💰' },
+      { id: 'configuracion', label: 'Config', icon: '⚙️' }
+    ];
+
+    let content = '';
+    if (state.activeTab === 'inicio') content = renderHome();
+    else if (state.activeTab === 'vender') content = renderSell();
+    else if (state.activeTab === 'pedidos') content = renderOrders();
+    else if (state.activeTab === 'clientes') content = renderClients();
+    else if (state.activeTab === 'productos') content = renderProductsList();
+    else if (state.activeTab === 'transacciones') content = renderTransactions();
+    else if (state.activeTab === 'configuracion') content = renderConfiguracion();
+
+    document.getElementById('app').innerHTML = `
+      <div class="pb-20">
+        <div class="bg-teal-700 text-white p-4 sticky top-0 z-20 shadow-md">
+          <div class="flex justify-between items-center">
+            <div><span class="font-bold text-lg">🐟 Cotilpez POS</span><p class="text-xs text-teal-200">${state.user?.nombre || ''}</p></div>
+            <div class="flex gap-2">
+              ${state.impresoraConectada ? 
+                `<span class="bg-green-500 text-xs px-2 py-1 rounded-full flex items-center gap-1">🖨️ ${state.nombreImpresora}</span>` : 
+                `<button onclick="conectarImpresora()" class="bg-teal-800 px-3 py-1 rounded-lg text-xs" ${state.loadingButtons.conectarImpresora ? 'disabled' : ''}>
+                  ${state.loadingButtons.conectarImpresora ? '🔄' : '🖨️'} Conectar
+                </button>`
+              }
+              <button onclick="logout()" class="bg-teal-800 px-4 py-1 rounded-lg text-sm">Salir</button>
+            </div>
+          </div>
+        </div>
+        <div class="flex bg-white border-b sticky top-[72px] z-20 overflow-x-auto">
+          ${tabs.map(t => `<button onclick="setActiveTab('${t.id}')" class="flex-1 py-3 text-center font-medium whitespace-nowrap ${state.activeTab === t.id ? 'text-teal-600 border-b-2 border-teal-600' : 'text-gray-500'}">${t.icon} ${t.label}</button>`).join('')}
+        </div>
+        <div class="p-4">${content}</div>
+      </div>
+      ${state.showCart ? renderCartModal() : ''}
+      ${state.showPayment ? renderPaymentModal() : ''}
+      ${state.selectedProduct ? renderQuantityModal() : ''}
+      ${state.showOrderDetail ? renderOrderDetailModal() : ''}
+      ${state.showClientHistory ? renderClientHistoryModal() : ''}
+      ${state.showNewClientModal ? renderNewClientModal() : ''}
+      ${state.editingCartIndex !== null ? renderEditCartModal() : ''}
+      ${state.showPrintModal ? renderPrintModal() : ''}
+      ${state.showEditOrderModal ? renderEditOrderModal() : ''}
+      ${state.showEditQuantityModal ? renderEditQuantityModal() : ''}
+      ${state.showConfigNumeracionModal ? renderConfigNumeracionModal() : ''}
+    `;
+    
+    setTimeout(() => {
+      if (state.activeTab === 'vender') {
+        setupClientSearchEvents();
+        setupProductSearchEvents();
+      }
+      if (state.activeTab === 'clientes') {
+        setupClientListSearchEvents();
+      }
+      if (state.activeTab === 'pedidos' || state.activeTab === 'transacciones') {
+        setupFilterEvents();
+      }
+      if (state.showEditOrderModal) {
+        setupEditClientSearch();
+        setupEditProductSearch();
+      }
+    }, 100);
+  }
+
+  // ============ FUNCIONES DE RENDER (continuación) ============
+  function renderConfiguracion() {
+    const siguienteNumero = state.configNumeracion?.ultimoNumero + 1 || 1001;
+    return `
+      <div class="space-y-4">
+        <div class="bg-white rounded-xl p-4 shadow-sm border">
+          <h3 class="font-bold text-lg mb-4 flex items-center gap-2">⚙️ Configuración de Numeración de Facturas</h3>
+          
+          <div class="bg-teal-50 rounded-xl p-4 mb-4">
+            <p class="text-sm text-teal-700 mb-2">📄 Formato de factura: <strong class="font-mono">Número consecutivo (1000, 1001, 1002...)</strong></p>
+            <p class="text-sm text-teal-700">🔢 Próximo número de factura: <strong class="text-xl">${siguienteNumero}</strong></p>
+            <p class="text-xs text-teal-600 mt-2">💡 El ID interno del pedido (ORD-xxx) se mantiene para enlaces internos</p>
+          </div>
+          
+          <div class="border-t pt-4">
+            <p class="font-bold text-sm mb-2">✏️ Cambiar número inicial</p>
+            <p class="text-xs text-gray-500 mb-3">Si cambias el número, la PRÓXIMA factura usará el número que elijas.</p>
+            <div class="flex gap-2">
+              <input type="number" id="nuevoNumeroInicial" placeholder="Ej: 5000" class="flex-1 border border-gray-300 rounded-xl p-3 bg-white">
+              <button onclick="abrirModalConfiguracionNumeracion()" class="bg-teal-600 text-white px-5 rounded-xl font-bold">Cambiar</button>
+            </div>
+          </div>
+        </div>
+        
+        <div class="bg-white rounded-xl p-4 shadow-sm border">
+          <h3 class="font-bold text-lg mb-4">ℹ️ Información del Sistema</h3>
+          <div class="space-y-2 text-sm">
+            <p><strong>📦 Total Productos:</strong> ${state.productos.length}</p>
+            <p><strong>👥 Total Clientes:</strong> ${state.clientes.length}</p>
+            <p><strong>📋 Total Pedidos:</strong> ${state.pedidos.length}</p>
+            <p><strong>💰 Total Transacciones:</strong> ${state.transacciones.length}</p>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderConfigNumeracionModal() {
+    return `
+      <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-xl p-6 w-full max-w-md">
+          <h3 class="font-bold text-xl mb-4">⚙️ Cambiar Número Inicial de Facturación</h3>
+          <p class="text-sm text-gray-600 mb-4">Ingresa el número con el que quieres que empiece la PRÓXIMA factura:</p>
+          <input type="number" id="modalNuevoNumero" placeholder="Ej: 5000" class="w-full border border-gray-300 rounded-xl p-3 mb-4" value="${state.nuevoNumeroInicial}">
+          <div class="flex gap-3">
+            <button onclick="guardarNuevoNumeroInicial()" class="flex-1 bg-teal-600 text-white py-3 rounded-xl font-bold" ${state.loadingButtons.actualizarNumeracion ? 'disabled' : ''}>
+              ${state.loadingButtons.actualizarNumeracion ? '<span class="spinner"></span>Guardando...' : 'Guardar'}
+            </button>
+            <button onclick="cerrarModalConfiguracionNumeracion()" class="flex-1 bg-gray-200 py-3 rounded-xl font-bold">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function abrirModalConfiguracionNumeracion() {
+    const input = document.getElementById('nuevoNumeroInicial');
+    if (input && input.value) {
+      state.nuevoNumeroInicial = input.value;
+    } else {
+      state.nuevoNumeroInicial = '';
+    }
+    state.showConfigNumeracionModal = true;
+    render();
+  }
+
+  function cerrarModalConfiguracionNumeracion() {
+    state.showConfigNumeracionModal = false;
+    state.nuevoNumeroInicial = '';
+    render();
+  }
+
+  function setupClientSearchEvents() {
+    const input = document.getElementById('clientSearchInputVender');
+    if (!input) return;
+    
+    const updateDropdown = () => {
+      const searchText = input.value.toLowerCase();
+      const filtered = state.clientes.filter(c => 
+        (c.nombre || '').toLowerCase().includes(searchText) || 
+        (c.telefono || '').includes(searchText)
+      ).slice(0, 8);
+      
+      const dropdown = document.getElementById('clientDropdownVender');
+      if (dropdown && searchText.length > 0 && filtered.length > 0) {
+        dropdown.innerHTML = filtered.map(c => `
+          <button onclick="selectClientFromDropdown(${c.id}, '${c.nombre.replace(/'/g, "\\'")}', '${(c.telefono || '').replace(/'/g, "\\'")}')" class="w-full text-left p-3 hover:bg-gray-50 border-b last:border-b-0">
+            <div class="font-medium">${c.nombre}</div>
+            <div class="text-xs text-gray-400">📞 ${c.telefono || 'Sin teléfono'}</div>
+          </button>
+        `).join('');
+        dropdown.style.display = 'block';
+      } else if (dropdown) {
+        dropdown.style.display = 'none';
+      }
+    };
+    
+    input.addEventListener('input', updateDropdown);
+    input.addEventListener('focus', updateDropdown);
+    document.addEventListener('click', (e) => {
+      const dropdown = document.getElementById('clientDropdownVender');
+      if (dropdown && !input.contains(e.target) && !dropdown.contains(e.target)) {
+        dropdown.style.display = 'none';
+      }
+    });
+  }
+
+  function setupProductSearchEvents() {
+    const input = document.getElementById('productSearchInputVender');
+    if (!input) return;
+    
+    const updateDropdown = () => {
+      const searchText = input.value.toLowerCase();
+      const filtered = state.productos.filter(p => 
+        (p.nombre || '').toLowerCase().includes(searchText) || 
+        (p.código || '').toLowerCase().includes(searchText)
+      ).slice(0, 10);
+      
+      const dropdown = document.getElementById('productDropdownVender');
+      if (dropdown && searchText.length > 0 && filtered.length > 0) {
+        dropdown.innerHTML = filtered.map(p => `
+          <button onclick="selectProductFromDropdown('${p.código}')" class="w-full text-left p-3 hover:bg-gray-50 border-b last:border-b-0">
+            <div class="flex justify-between">
+              <span class="font-medium">${p.nombre}</span>
+              <span class="text-teal-600 font-bold">$${Number(p.precio).toLocaleString()}</span>
+            </div>
+            <div class="flex justify-between text-xs text-gray-400 mt-1">
+              <span>Cód: ${p.código}</span>
+              <span>📦 Stock: ${p.stock || 0}</span>
+            </div>
+          </button>
+        `).join('');
+        dropdown.style.display = 'block';
+      } else if (dropdown) {
+        dropdown.style.display = 'none';
+      }
+    };
+    
+    input.addEventListener('input', updateDropdown);
+    input.addEventListener('focus', updateDropdown);
+    document.addEventListener('click', (e) => {
+      const dropdown = document.getElementById('productDropdownVender');
+      if (dropdown && !input.contains(e.target) && !dropdown.contains(e.target)) {
+        dropdown.style.display = 'none';
+      }
+    });
+  }
+
+  function setupClientListSearchEvents() {
+    const input = document.getElementById('clientSearchInputClientes');
+    if (!input) return;
+    
+    const filterList = () => {
+      const searchText = input.value.toLowerCase();
+      const container = document.getElementById('clientListContainer');
+      if (!container) return;
+      
+      const filtered = state.clientes.filter(c => 
+        (c.nombre || '').toLowerCase().includes(searchText) || 
+        (c.telefono || '').includes(searchText)
+      );
+      
+      if (filtered.length === 0) {
+        container.innerHTML = '<p class="text-center text-gray-400 py-8 bg-white rounded-xl">No se encontraron clientes</p>';
+      } else {
+        container.innerHTML = filtered.map(c => `
+          <div class="bg-white rounded-xl p-3 shadow-sm border flex justify-between items-center">
+            <div>
+              <p class="font-bold">${c.nombre || 'Sin nombre'}</p>
+              <p class="text-xs text-gray-400">📞 ${c.telefono || 'Sin teléfono'}</p>
+              ${Number(c.saldo_por_cobrar) > 0 ? `<p class="text-xs text-orange-500 font-bold">💰 Saldo: $${Number(c.saldo_por_cobrar).toLocaleString()}</p>` : ''}
+            </div>
+            <button onclick="verHistorialCliente(${c.id})" class="bg-gray-100 px-3 py-2 rounded-lg text-sm">Historial</button>
+          </div>
+        `).join('');
+      }
+    };
+    
+    input.addEventListener('input', filterList);
+  }
+
+  function setupFilterEvents() {
+    if (state.activeTab === 'pedidos') {
+      const tipoSelect = document.getElementById('tipoFiltroFechaPedidos');
+      if (tipoSelect) {
+        tipoSelect.addEventListener('change', () => {
+          const tipo = tipoSelect.value;
+          const divFecha = document.getElementById('divFechaPedidos');
+          if (tipo === 'fecha') {
+            divFecha.innerHTML = `<div><label class="text-xs text-gray-500">Fecha</label><input type="date" id="fechaEspecificaPedidos" class="w-full border border-gray-300 rounded-lg p-2 text-sm" onchange="aplicarFiltroPedidos()"></div>`;
+          } else if (tipo === 'rango') {
+            divFecha.innerHTML = `<div class="grid grid-cols-2 gap-2"><div><label class="text-xs text-gray-500">Desde</label><input type="date" id="fechaInicioPedidos" class="w-full border border-gray-300 rounded-lg p-2 text-sm" onchange="aplicarFiltroPedidos()"></div><div><label class="text-xs text-gray-500">Hasta</label><input type="date" id="fechaFinPedidos" class="w-full border border-gray-300 rounded-lg p-2 text-sm" onchange="aplicarFiltroPedidos()"></div></div>`;
+          } else {
+            divFecha.innerHTML = '';
+          }
+          state.filtroPedidos.tipoFiltro = tipo;
+        });
+      }
+    }
+    
+    if (state.activeTab === 'transacciones') {
+      const tipoSelect = document.getElementById('tipoFiltroFechaTransacciones');
+      if (tipoSelect) {
+        tipoSelect.addEventListener('change', () => {
+          const tipo = tipoSelect.value;
+          const divFecha = document.getElementById('divFechaTransacciones');
+          if (tipo === 'fecha') {
+            divFecha.innerHTML = `<div><label class="text-xs text-gray-500">Fecha</label><input type="date" id="fechaEspecificaTransacciones" class="w-full border border-gray-300 rounded-lg p-2 text-sm" onchange="aplicarFiltroTransacciones()"></div>`;
+          } else if (tipo === 'rango') {
+            divFecha.innerHTML = `<div class="grid grid-cols-2 gap-2"><div><label class="text-xs text-gray-500">Desde</label><input type="date" id="fechaInicioTransacciones" class="w-full border border-gray-300 rounded-lg p-2 text-sm" onchange="aplicarFiltroTransacciones()"></div><div><label class="text-xs text-gray-500">Hasta</label><input type="date" id="fechaFinTransacciones" class="w-full border border-gray-300 rounded-lg p-2 text-sm" onchange="aplicarFiltroTransacciones()"></div></div>`;
+          } else {
+            divFecha.innerHTML = '';
+          }
+          state.filtroTransacciones.tipoFiltro = tipo;
+        });
+      }
+    }
+  }
+
+  function renderHome() {
+    const today = new Date().toISOString().split('T')[0];
+    const todayStats = state.estadisticas.find(s => s.fecha === today) || { facturacion: 0, ventas: 0 };
+    const pendingOrders = state.pedidos.filter(p => p.estado === 'Pendiente').length;
+    return `
+      <div class="space-y-4">
+        <div class="bg-gradient-to-r from-teal-600 to-teal-700 rounded-xl p-5 text-white">
+          <p class="text-teal-100 text-sm">${new Date().toLocaleDateString('es-CO', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
+          <p class="text-2xl font-bold mt-1">¡Hola, ${state.user?.nombre?.split(' ')[0] || ''}!</p>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div class="bg-white rounded-xl p-4 shadow-sm border"><p class="text-gray-500 text-xs">📊 Ventas Hoy</p><p class="text-xl font-bold text-teal-600">$${todayStats.facturacion?.toLocaleString() || 0}</p></div>
+          <div class="bg-white rounded-xl p-4 shadow-sm border"><p class="text-gray-500 text-xs">📋 Pedidos Pendientes</p><p class="text-xl font-bold text-orange-500">${pendingOrders}</p></div>
+          <div class="bg-white rounded-xl p-4 shadow-sm border"><p class="text-gray-500 text-xs">📦 Productos</p><p class="text-xl font-bold">${state.productos.length}</p></div>
+          <div class="bg-white rounded-xl p-4 shadow-sm border"><p class="text-gray-500 text-xs">👥 Clientes</p><p class="text-xl font-bold">${state.clientes.length}</p></div>
+        </div>
+        <button onclick="setActiveTab('vender')" class="w-full bg-teal-600 text-white py-4 rounded-xl font-bold shadow-lg">➕ Nueva Venta</button>
+      </div>
+    `;
+  }
+
+  function renderSell() {
+    const cartTotal = state.cart.reduce((s, i) => s + ((i.unitPrice || i.product.precio) * i.quantity), 0);
+    const cartItems = state.cart.reduce((a, b) => a + b.quantity, 0);
+    const categories = ['TODOS', ...new Set(state.productos.map(p => p.categoría || 'General'))];
+    const filteredProducts = state.productos.filter(p => {
+      const matchCategory = state.selectedCategory === 'TODOS' || p.categoría === state.selectedCategory;
+      return matchCategory;
+    });
+    
+    const proximaFactura = state.configNumeracion?.ultimoNumero + 1 || 1001;
+    
+    return `
+      <div class="space-y-3">
+        <div class="bg-teal-50 rounded-xl p-2 text-center text-xs text-teal-600">
+          📄 Próxima factura: <strong>${proximaFactura}</strong>
+        </div>
+        
+        <div class="bg-white rounded-xl p-3 shadow-sm border relative">
+          <p class="text-sm font-bold text-gray-600 mb-2">👤 Cliente</p>
+          <input type="text" id="clientSearchInputVender" placeholder="🔍 Escribe nombre o teléfono del cliente..." class="w-full border border-gray-300 rounded-xl p-3 bg-white" autocomplete="off" value="${state.selectedClientName}">
+          <div id="clientDropdownVender" class="search-dropdown" style="display: none; position: absolute; left: 12px; right: 12px; top: 100px;"></div>
+          ${state.selectedClient ? `
+            <div class="mt-2 bg-teal-50 p-2 rounded-lg flex justify-between items-center">
+              <div>
+                <span class="text-sm font-medium text-teal-700">✓ Cliente seleccionado: ${state.selectedClient.nombre}</span>
+              </div>
+              <button onclick="clearSelectedClient()" class="text-xs text-red-500">✕ Cambiar</button>
+            </div>
+          ` : ''}
+          <button onclick="openNewClientModal()" class="text-xs text-teal-600 mt-2 block w-full text-left">+ Crear nuevo cliente</button>
+        </div>
+        
+        <div class="relative">
+          <input type="text" id="productSearchInputVender" placeholder="🔍 Escribe nombre o código del producto..." class="w-full border border-gray-300 rounded-xl p-3 bg-white" autocomplete="off">
+          <div id="productDropdownVender" class="search-dropdown" style="display: none; position: absolute; left: 0; right: 0; top: 55px;"></div>
+        </div>
+        
+        <div class="flex gap-2 overflow-x-auto no-scrollbar pb-2">
+          ${categories.map(c => `<button onclick="setCategory('${c}')" class="px-4 py-2 rounded-full text-sm whitespace-nowrap ${state.selectedCategory === c ? 'bg-teal-600 text-white' : 'bg-gray-200 text-gray-700'}">${c}</button>`).join('')}
+        </div>
+        
+        <div class="grid grid-cols-2 gap-3">
+          ${filteredProducts.map(p => `
+            <button onclick="selectProduct('${p.código}')" class="bg-white rounded-xl p-3 shadow-sm border text-left active:scale-95 transition-all">
+              <div class="flex justify-between"><span class="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded">${p.código}</span><span class="text-xs text-gray-400">📦 ${p.stock || 0}</span></div>
+              <p class="font-bold text-sm mt-2">${p.nombre}</p>
+              <p class="text-teal-600 font-bold mt-2 text-lg">$${Number(p.precio).toLocaleString()}</p>
+            </button>
+          `).join('')}
+          ${filteredProducts.length === 0 ? '<p class="text-center text-gray-400 py-8 col-span-2">No se encontraron productos</p>' : ''}
+        </div>
+        
+        <div class="bg-white rounded-xl p-3 shadow-sm border">
+          <p class="text-sm font-bold text-gray-600 mb-2">📝 Comentarios</p>
+          <textarea id="observacionVenta" rows="2" placeholder="Notas adicionales sobre la venta..." class="w-full border border-gray-300 rounded-xl p-3 bg-white" oninput="updateObservacion(this.value)">${state.observacion}</textarea>
+        </div>
+        
+        ${cartItems > 0 ? `<div class="fixed bottom-20 left-0 right-0 px-4 z-30"><button onclick="openCart()" class="w-full bg-teal-600 text-white py-3 rounded-xl shadow-lg flex justify-between items-center px-5"><div><span class="text-xs text-teal-200">🛒 Carrito</span><p class="font-bold">${cartItems} productos</p></div><div class="text-right"><span class="text-xs text-teal-200">Total</span><p class="font-bold text-lg">$${cartTotal.toLocaleString()}</p></div><span class="text-xl">→</span></button></div>` : ''}
+      </div>
+    `;
+  }
+
+  function filtrarOrdenarPedidos() {
+    let pedidosFiltrados = [...state.pedidos];
+    
+    if (state.filtroPedidos.vendedor !== 'TODOS') {
+      pedidosFiltrados = pedidosFiltrados.filter(p => p.nombre_vendedor === state.filtroPedidos.vendedor);
+    }
+    
+    if (state.filtroPedidos.tipoFiltro === 'fecha' && state.filtroPedidos.fechaInicio) {
+      const fechaInicio = new Date(state.filtroPedidos.fechaInicio);
+      fechaInicio.setHours(0,0,0,0);
+      pedidosFiltrados = pedidosFiltrados.filter(p => {
+        const fechaPedido = new Date(p.fecha);
+        return fechaPedido >= fechaInicio;
+      });
+    } else if (state.filtroPedidos.tipoFiltro === 'rango' && state.filtroPedidos.fechaInicio && state.filtroPedidos.fechaFin) {
+      const fechaInicio = new Date(state.filtroPedidos.fechaInicio);
+      const fechaFin = new Date(state.filtroPedidos.fechaFin);
+      fechaInicio.setHours(0,0,0,0);
+      fechaFin.setHours(23,59,59,999);
+      pedidosFiltrados = pedidosFiltrados.filter(p => {
+        const fechaPedido = new Date(p.fecha);
+        return fechaPedido >= fechaInicio && fechaPedido <= fechaFin;
+      });
+    }
+    
+    pedidosFiltrados.sort((a, b) => {
+      if (state.filtroPedidos.orden === 'fecha_desc') return new Date(b.fecha) - new Date(a.fecha);
+      if (state.filtroPedidos.orden === 'fecha_asc') return new Date(a.fecha) - new Date(b.fecha);
+      if (state.filtroPedidos.orden === 'consecutivo_desc') return (b.numero_factura || 0) - (a.numero_factura || 0);
+      if (state.filtroPedidos.orden === 'consecutivo_asc') return (a.numero_factura || 0) - (b.numero_factura || 0);
+      if (state.filtroPedidos.orden === 'total_desc') return b.total - a.total;
+      if (state.filtroPedidos.orden === 'total_asc') return a.total - b.total;
+      return 0;
+    });
+    
+    return pedidosFiltrados;
+  }
+
+  function renderOrders() {
+    const vendedores = ['TODOS', ...new Set(state.pedidos.map(p => p.nombre_vendedor).filter(v => v))];
+    const pedidosFiltrados = filtrarOrdenarPedidos();
+    const pedidosPendientes = pedidosFiltrados.filter(p => p.estado === 'Pendiente');
+    
+    return `
+      <div class="space-y-4">
+        <div class="bg-white rounded-xl p-4 shadow-sm border">
+          <h3 class="font-bold text-sm mb-3">🔍 Filtros Avanzados</h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs text-gray-500">Vendedor</label>
+              <select id="filtroVendedorPedidos" class="w-full border border-gray-300 rounded-lg p-2 text-sm" onchange="aplicarFiltroPedidos()">
+                ${vendedores.map(v => `<option value="${v}" ${state.filtroPedidos.vendedor === v ? 'selected' : ''}>${v}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label class="text-xs text-gray-500">Ordenar por</label>
+              <select id="filtroOrdenPedidos" class="w-full border border-gray-300 rounded-lg p-2 text-sm" onchange="aplicarFiltroPedidos()">
+                <option value="fecha_desc" ${state.filtroPedidos.orden === 'fecha_desc' ? 'selected' : ''}>Más reciente primero</option>
+                <option value="fecha_asc" ${state.filtroPedidos.orden === 'fecha_asc' ? 'selected' : ''}>Más antiguo primero</option>
+                <option value="consecutivo_desc" ${state.filtroPedidos.orden === 'consecutivo_desc' ? 'selected' : ''}>Factura (Z-A)</option>
+                <option value="consecutivo_asc" ${state.filtroPedidos.orden === 'consecutivo_asc' ? 'selected' : ''}>Factura (A-Z)</option>
+                <option value="total_desc" ${state.filtroPedidos.orden === 'total_desc' ? 'selected' : ''}>Mayor total</option>
+                <option value="total_asc" ${state.filtroPedidos.orden === 'total_asc' ? 'selected' : ''}>Menor total</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-xs text-gray-500">Tipo de filtro por fecha</label>
+              <select id="tipoFiltroFechaPedidos" class="w-full border border-gray-300 rounded-lg p-2 text-sm">
+                <option value="ninguno" ${state.filtroPedidos.tipoFiltro === 'ninguno' ? 'selected' : ''}>Sin filtro de fecha</option>
+                <option value="fecha" ${state.filtroPedidos.tipoFiltro === 'fecha' ? 'selected' : ''}>Fecha específica</option>
+                <option value="rango" ${state.filtroPedidos.tipoFiltro === 'rango' ? 'selected' : ''}>Rango de fechas</option>
+              </select>
+            </div>
+            <div id="divFechaPedidos">
+              ${state.filtroPedidos.tipoFiltro === 'fecha' ? `
+                <div>
+                  <label class="text-xs text-gray-500">Fecha</label>
+                  <input type="date" id="fechaEspecificaPedidos" class="w-full border border-gray-300 rounded-lg p-2 text-sm" value="${state.filtroPedidos.fechaInicio}" onchange="aplicarFiltroPedidos()">
+                </div>
+              ` : state.filtroPedidos.tipoFiltro === 'rango' ? `
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <label class="text-xs text-gray-500">Desde</label>
+                    <input type="date" id="fechaInicioPedidos" class="w-full border border-gray-300 rounded-lg p-2 text-sm" value="${state.filtroPedidos.fechaInicio}" onchange="aplicarFiltroPedidos()">
+                  </div>
+                  <div>
+                    <label class="text-xs text-gray-500">Hasta</label>
+                    <input type="date" id="fechaFinPedidos" class="w-full border border-gray-300 rounded-lg p-2 text-sm" value="${state.filtroPedidos.fechaFin}" onchange="aplicarFiltroPedidos()">
+                  </div>
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        </div>
+        
+        <h2 class="font-bold text-lg">📋 Pedidos Pendientes (${pedidosPendientes.length})</h2>
+        ${pedidosPendientes.length === 0 ? '<p class="text-gray-400 text-center py-8 bg-white rounded-xl">No hay pedidos pendientes</p>' : pedidosPendientes.map(p => `
+          <div class="bg-white rounded-xl p-4 shadow-sm border">
+            <div class="flex justify-between items-start">
+              <div>
+                <span class="font-bold">${p.nombre_cliente}</span>
+                <p class="text-xs text-gray-400">Factura #${p.numero_factura || p.id_pedido}</p>
+                <p class="text-xs text-gray-400">📅 ${formatFecha(p.fecha)}</p>
+                <p class="text-xs text-gray-400">👤 ${p.nombre_vendedor || 'Sin vendedor'}</p>
+              </div>
+              <div class="text-right">
+                <span class="text-teal-600 font-bold">$${Number(p.total).toLocaleString()}</span>
+              </div>
+            </div>
+            <div class="flex gap-2 mt-3">
+              <button onclick="verDetallePedido('${p.id_pedido}')" class="flex-1 bg-gray-100 py-2 rounded-lg text-sm">Ver</button>
+              <button onclick="abrirEditarPedido('${p.id_pedido}')" class="flex-1 bg-yellow-500 text-white py-2 rounded-lg text-sm">✏️ Editar</button>
+              <button onclick="mostrarOpcionesImpresion('${p.id_pedido}')" class="flex-1 bg-blue-500 text-white py-2 rounded-lg text-sm">🖨️ Imprimir</button>
+              <button onclick="confirmarPedido('${p.id_pedido}')" class="flex-1 bg-green-500 text-white py-2 rounded-lg text-sm" ${state.loadingButtons.confirmarPedido ? 'disabled' : ''}>${state.loadingButtons.confirmarPedido ? '<span class="spinner"></span>Confirmando...' : 'Confirmar'}</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  function filtrarOrdenarTransacciones() {
+    let transaccionesFiltradas = [...state.pedidos.filter(p => p.estado === 'Confirmado')];
+    
+    if (state.filtroTransacciones.vendedor !== 'TODOS') {
+      transaccionesFiltradas = transaccionesFiltradas.filter(p => p.nombre_vendedor === state.filtroTransacciones.vendedor);
+    }
+    
+    if (state.filtroTransacciones.tipoFiltro === 'fecha' && state.filtroTransacciones.fechaInicio) {
+      const fechaInicio = new Date(state.filtroTransacciones.fechaInicio);
+      fechaInicio.setHours(0,0,0,0);
+      transaccionesFiltradas = transaccionesFiltradas.filter(p => {
+        const fechaPedido = new Date(p.fecha);
+        return fechaPedido >= fechaInicio;
+      });
+    } else if (state.filtroTransacciones.tipoFiltro === 'rango' && state.filtroTransacciones.fechaInicio && state.filtroTransacciones.fechaFin) {
+      const fechaInicio = new Date(state.filtroTransacciones.fechaInicio);
+      const fechaFin = new Date(state.filtroTransacciones.fechaFin);
+      fechaInicio.setHours(0,0,0,0);
+      fechaFin.setHours(23,59,59,999);
+      transaccionesFiltradas = transaccionesFiltradas.filter(p => {
+        const fechaPedido = new Date(p.fecha);
+        return fechaPedido >= fechaInicio && fechaPedido <= fechaFin;
+      });
+    }
+    
+    transaccionesFiltradas.sort((a, b) => {
+      if (state.filtroTransacciones.orden === 'fecha_desc') return new Date(b.fecha) - new Date(a.fecha);
+      if (state.filtroTransacciones.orden === 'fecha_asc') return new Date(a.fecha) - new Date(b.fecha);
+      if (state.filtroTransacciones.orden === 'consecutivo_desc') return (b.numero_factura || 0) - (a.numero_factura || 0);
+      if (state.filtroTransacciones.orden === 'consecutivo_asc') return (a.numero_factura || 0) - (b.numero_factura || 0);
+      if (state.filtroTransacciones.orden === 'total_desc') return b.total - a.total;
+      if (state.filtroTransacciones.orden === 'total_asc') return a.total - b.total;
+      return 0;
+    });
+    
+    return transaccionesFiltradas;
+  }
+
+  function renderTransactions() {
+    const vendedores = ['TODOS', ...new Set(state.pedidos.map(p => p.nombre_vendedor).filter(v => v))];
+    const transaccionesFiltradas = filtrarOrdenarTransacciones();
+    
+    return `
+      <div class="space-y-4">
+        <div class="bg-white rounded-xl p-4 shadow-sm border">
+          <h3 class="font-bold text-sm mb-3">🔍 Filtros Avanzados</h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs text-gray-500">Vendedor</label>
+              <select id="filtroVendedorTransacciones" class="w-full border border-gray-300 rounded-lg p-2 text-sm" onchange="aplicarFiltroTransacciones()">
+                ${vendedores.map(v => `<option value="${v}" ${state.filtroTransacciones.vendedor === v ? 'selected' : ''}>${v}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label class="text-xs text-gray-500">Ordenar por</label>
+              <select id="filtroOrdenTransacciones" class="w-full border border-gray-300 rounded-lg p-2 text-sm" onchange="aplicarFiltroTransacciones()">
+                <option value="fecha_desc" ${state.filtroTransacciones.orden === 'fecha_desc' ? 'selected' : ''}>Más reciente primero</option>
+                <option value="fecha_asc" ${state.filtroTransacciones.orden === 'fecha_asc' ? 'selected' : ''}>Más antiguo primero</option>
+                <option value="consecutivo_desc" ${state.filtroTransacciones.orden === 'consecutivo_desc' ? 'selected' : ''}>Factura (Z-A)</option>
+                <option value="consecutivo_asc" ${state.filtroTransacciones.orden === 'consecutivo_asc' ? 'selected' : ''}>Factura (A-Z)</option>
+                <option value="total_desc" ${state.filtroTransacciones.orden === 'total_desc' ? 'selected' : ''}>Mayor total</option>
+                <option value="total_asc" ${state.filtroTransacciones.orden === 'total_asc' ? 'selected' : ''}>Menor total</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-xs text-gray-500">Tipo de filtro por fecha</label>
+              <select id="tipoFiltroFechaTransacciones" class="w-full border border-gray-300 rounded-lg p-2 text-sm">
+                <option value="ninguno" ${state.filtroTransacciones.tipoFiltro === 'ninguno' ? 'selected' : ''}>Sin filtro de fecha</option>
+                <option value="fecha" ${state.filtroTransacciones.tipoFiltro === 'fecha' ? 'selected' : ''}>Fecha específica</option>
+                <option value="rango" ${state.filtroTransacciones.tipoFiltro === 'rango' ? 'selected' : ''}>Rango de fechas</option>
+              </select>
+            </div>
+            <div id="divFechaTransacciones">
+              ${state.filtroTransacciones.tipoFiltro === 'fecha' ? `
+                <div>
+                  <label class="text-xs text-gray-500">Fecha</label>
+                  <input type="date" id="fechaEspecificaTransacciones" class="w-full border border-gray-300 rounded-lg p-2 text-sm" value="${state.filtroTransacciones.fechaInicio}" onchange="aplicarFiltroTransacciones()">
+                </div>
+              ` : state.filtroTransacciones.tipoFiltro === 'rango' ? `
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <label class="text-xs text-gray-500">Desde</label>
+                    <input type="date" id="fechaInicioTransacciones" class="w-full border border-gray-300 rounded-lg p-2 text-sm" value="${state.filtroTransacciones.fechaInicio}" onchange="aplicarFiltroTransacciones()">
+                  </div>
+                  <div>
+                    <label class="text-xs text-gray-500">Hasta</label>
+                    <input type="date" id="fechaFinTransacciones" class="w-full border border-gray-300 rounded-lg p-2 text-sm" value="${state.filtroTransacciones.fechaFin}" onchange="aplicarFiltroTransacciones()">
+                  </div>
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        </div>
+        
+        <h2 class="font-bold text-lg">💰 Transacciones Confirmadas (${transaccionesFiltradas.length})</h2>
+        ${transaccionesFiltradas.length === 0 ? '<p class="text-gray-400 text-center py-8 bg-white rounded-xl">No hay transacciones confirmadas</p>' : transaccionesFiltradas.map(p => `
+          <div class="bg-white rounded-xl p-4 shadow-sm border">
+            <div class="flex justify-between"><span class="font-bold">${p.nombre_cliente}</span><span class="text-teal-600 font-bold">$${Number(p.total).toLocaleString()}</span></div>
+            <p class="text-xs text-gray-400">Factura #${p.numero_factura || p.id_pedido}</p>
+            <p class="text-xs text-gray-400">📅 ${formatFecha(p.fecha)}</p>
+            <p class="text-xs text-gray-400">👤 Vendedor: ${p.nombre_vendedor || 'Sin vendedor'}</p>
+            <div class="flex gap-2 mt-3"><button onclick="verDetallePedido('${p.id_pedido}')" class="flex-1 bg-gray-100 py-2 rounded-lg text-sm">Ver</button><button onclick="mostrarOpcionesImpresion('${p.id_pedido}')" class="flex-1 bg-blue-500 text-white py-2 rounded-lg text-sm">🖨️ Imprimir</button></div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  function renderClients() {
+    return `
+      <div class="space-y-3">
+        <div class="flex gap-2">
+          <input type="text" id="clientSearchInputClientes" placeholder="🔍 Buscar por nombre o teléfono..." class="flex-1 border border-gray-300 rounded-xl p-3 bg-white" autocomplete="off">
+          <button onclick="openNewClientModal()" class="bg-teal-600 text-white px-5 rounded-xl font-bold">+ Nuevo</button>
+        </div>
+        <div id="clientListContainer">
+          ${state.clientes.map(c => `
+            <div class="bg-white rounded-xl p-3 shadow-sm border flex justify-between items-center">
+              <div>
+                <p class="font-bold">${c.nombre || 'Sin nombre'}</p>
+                <p class="text-xs text-gray-400">📞 ${c.telefono || 'Sin teléfono'}</p>
+                ${Number(c.saldo_por_cobrar) > 0 ? `<p class="text-xs text-orange-500 font-bold">💰 Saldo: $${Number(c.saldo_por_cobrar).toLocaleString()}</p>` : ''}
+              </div>
+              <button onclick="verHistorialCliente(${c.id})" class="bg-gray-100 px-3 py-2 rounded-lg text-sm">Historial</button>
+            </div>
+          `).join('')}
+        </div>
+        ${state.clientes.length === 0 ? '<p class="text-center text-gray-400 py-8 bg-white rounded-xl">No hay clientes registrados</p>' : ''}
+      </div>
+    `;
+  }
+
+  function renderProductsList() {
+    return `
+      <div class="bg-white rounded-xl overflow-hidden shadow-sm border">
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50">
+              <tr><th class="p-3 text-left font-bold">Código</th><th class="p-3 text-left font-bold">Producto</th><th class="p-3 text-right font-bold">Precio</th><th class="p-3 text-right font-bold">Stock</th></tr>
+            </thead>
+            <tbody>${state.productos.map(p => `<tr class="border-t"><td class="p-3 font-mono text-xs">${p.código}</td><td class="p-3">${p.nombre}</td><td class="p-3 text-right font-bold">$${Number(p.precio).toLocaleString()}</td><td class="p-3 text-right text-gray-500">${p.stock || 0}</td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+        <div class="p-3 bg-gray-50 text-center text-xs text-gray-500 border-t">📊 Total: ${state.productos.length} productos</div>
+      </div>
+    `;
+  }
+
+  // ============ FUNCIONES GLOBALES ============
+  window.selectClientFromDropdown = (id, nombre, telefono) => {
+    state.selectedClient = { id, nombre, telefono };
+    state.selectedClientName = nombre;
+    const input = document.getElementById('clientSearchInputVender');
+    if (input) input.value = nombre;
+    const dropdown = document.getElementById('clientDropdownVender');
+    if (dropdown) dropdown.style.display = 'none';
+    render();
+  };
+
+  window.selectProductFromDropdown = (code) => {
+    state.selectedProduct = state.productos.find(p => p.código === code);
+    state.numValue = '0';
+    const input = document.getElementById('productSearchInputVender');
+    if (input) input.value = '';
+    const dropdown = document.getElementById('productDropdownVender');
+    if (dropdown) dropdown.style.display = 'none';
+    render();
+  };
+
+  window.clearSelectedClient = () => {
+    state.selectedClient = null;
+    state.selectedClientName = '';
+    const input = document.getElementById('clientSearchInputVender');
+    if (input) input.value = '';
+    render();
+  };
+
+  window.selectProduct = (code) => {
+    state.selectedProduct = state.productos.find(p => p.código === code);
+    state.numValue = '0';
+    render();
+  };
+
+  window.setCategory = (c) => {
+    state.selectedCategory = c;
+    render();
+  };
+
+  window.updateObservacion = (v) => {
+    state.observacion = v;
+  };
+
+  window.handleLogin = () => {
+    const email = document.getElementById('loginUser')?.value;
+    if (!email) { alert('Selecciona un usuario'); return; }
+    const user = state.usuarios.find(u => u.email === email);
+    if (user) { state.user = user; render(); }
+    else alert('Usuario no encontrado');
+  };
+  
+  window.logout = () => { state.user = null; render(); };
+  window.setActiveTab = (tab) => { state.activeTab = tab; state.showCart = false; state.showPayment = false; render(); };
+  window.closeQuantityModal = () => { state.selectedProduct = null; render(); };
+  
+  window.handleKeypad = (key) => {
+    if (key === 'del') state.numValue = state.numValue.length > 1 ? state.numValue.slice(0, -1) : '0';
+    else if (key === ',') { if (!state.numValue.includes(',')) state.numValue = state.numValue + '.'; }
+    else {
+      let newVal = state.numValue === '0' ? key : state.numValue + key;
+      if (parseFloat(newVal.replace(',', '.')) >= 0) state.numValue = newVal;
+    }
+    render();
+  };
+  
+  window.addToCartFromModal = () => {
+    if (!state.selectedProduct) return;
+    let qty = parseFloat(state.numValue.replace(',', '.'));
+    if (qty > 0) {
+      const existing = state.cart.find(i => i.product.código === state.selectedProduct.código);
+      if (existing) {
+        existing.quantity += qty;
+      } else {
+        state.cart.push({ 
+          product: state.selectedProduct, 
+          quantity: qty,
+          unitPrice: state.selectedProduct.precio
+        });
+      }
+      state.selectedProduct = null;
+      render();
+    } else {
+      alert('Cantidad inválida');
+    }
+  };
+  
+  window.updateCartPrice = (index, newPrice) => {
+    let price = parseFloat(newPrice);
+    if (!isNaN(price) && price > 0) {
+      state.cart[index].unitPrice = price;
+      render();
+    } else {
+      alert('Precio inválido');
+    }
+  };
+  
+  window.openCart = () => { state.showCart = true; render(); };
+  window.closeCart = () => { state.showCart = false; render(); };
+  window.removeFromCart = (idx) => { state.cart.splice(idx, 1); if (state.cart.length === 0) state.showCart = false; render(); };
+  
+  window.openEditCart = (idx) => { 
+    state.editingCartIndex = idx; 
+    state.editQuantityValue = state.cart[idx].quantity.toString(); 
+    render(); 
+  };
+  
+  window.closeEditCart = () => { state.editingCartIndex = null; render(); };
+  
+  window.handleEditKeypad = (key) => {
+    if (key === 'del') state.editQuantityValue = state.editQuantityValue.length > 1 ? state.editQuantityValue.slice(0, -1) : '0';
+    else if (key === ',') { if (!state.editQuantityValue.includes(',')) state.editQuantityValue = state.editQuantityValue + '.'; }
+    else state.editQuantityValue = state.editQuantityValue === '0' ? key : state.editQuantityValue + key;
+    render();
+  };
+  
+  window.saveEditCart = () => {
+    let qty = parseFloat(state.editQuantityValue.replace(',', '.'));
+    if (qty > 0 && state.editingCartIndex !== null) { 
+      state.cart[state.editingCartIndex].quantity = qty; 
+      state.editingCartIndex = null; 
+      render(); 
+    } else if (qty === 0 && state.editingCartIndex !== null) { 
+      state.cart.splice(state.editingCartIndex, 1); 
+      state.editingCartIndex = null; 
+      render(); 
+    }
+  };
+  
+  window.openPayment = () => { state.showCart = false; state.showPayment = true; render(); };
+  window.closePayment = () => { state.showPayment = false; render(); };
+  window.openNewClientModal = () => { state.showNewClientModal = true; render(); };
+  window.closeNewClientModal = () => { state.showNewClientModal = false; render(); };
+  
+  window.verDetallePedido = (id) => { 
+    state.selectedOrderId = id; 
+    state.showOrderDetail = true; 
+    render(); 
+  };
+  
+  window.closeOrderDetail = () => { state.showOrderDetail = false; render(); };
+  
+  window.closePrintModal = () => { state.showPrintModal = false; render(); };
+  
+  window.verHistorialCliente = (id) => { 
+    state.selectedClientForHistory = state.clientes.find(c => Number(c.id) === Number(id)); 
+    state.showClientHistory = true; 
+    render(); 
+  };
+  
+  window.closeClientHistory = () => { state.showClientHistory = false; render(); };
+  
+  window.aplicarFiltroPedidos = () => {
+    const vendedor = document.getElementById('filtroVendedorPedidos')?.value || 'TODOS';
+    const orden = document.getElementById('filtroOrdenPedidos')?.value || 'fecha_desc';
+    const tipo = document.getElementById('tipoFiltroFechaPedidos')?.value || 'ninguno';
+    
+    let fechaInicio = '', fechaFin = '';
+    if (tipo === 'fecha') {
+      fechaInicio = document.getElementById('fechaEspecificaPedidos')?.value || '';
+    } else if (tipo === 'rango') {
+      fechaInicio = document.getElementById('fechaInicioPedidos')?.value || '';
+      fechaFin = document.getElementById('fechaFinPedidos')?.value || '';
+    }
+    
+    state.filtroPedidos = { vendedor, orden, tipoFiltro: tipo, fechaInicio, fechaFin };
+    render();
+  };
+  
+  window.aplicarFiltroTransacciones = () => {
+    const vendedor = document.getElementById('filtroVendedorTransacciones')?.value || 'TODOS';
+    const orden = document.getElementById('filtroOrdenTransacciones')?.value || 'fecha_desc';
+    const tipo = document.getElementById('tipoFiltroFechaTransacciones')?.value || 'ninguno';
+    
+    let fechaInicio = '', fechaFin = '';
+    if (tipo === 'fecha') {
+      fechaInicio = document.getElementById('fechaEspecificaTransacciones')?.value || '';
+    } else if (tipo === 'rango') {
+      fechaInicio = document.getElementById('fechaInicioTransacciones')?.value || '';
+      fechaFin = document.getElementById('fechaFinTransacciones')?.value || '';
+    }
+    
+    state.filtroTransacciones = { vendedor, orden, tipoFiltro: tipo, fechaInicio, fechaFin };
+    render();
+  };
+
+  // ============ MODALES ============
+  function renderEditOrderModal() {
+    if (!state.editingOrder) return '';
+    const cartTotal = state.editCart.reduce((s, i) => s + ((i.unitPrice || i.product.precio) * i.quantity), 0);
+    const facturaNumero = state.editingOrder.numero_factura || state.editingOrder.id_pedido;
+    
+    return `
+      <div class="fixed inset-0 bg-white z-50 flex flex-col">
+        <div class="p-4 border-b flex justify-between items-center bg-teal-600 text-white sticky top-0">
+          <h2 class="font-bold text-lg">✏️ Editando Pedido - Factura #${facturaNumero}</h2>
+          <button onclick="closeEditOrderModal()" class="text-2xl">✕</button>
+        </div>
+        
+        <div class="flex-1 overflow-auto p-4 space-y-4">
+          
+          <div class="bg-gray-50 rounded-xl p-3 border">
+            <label class="text-sm font-bold text-gray-700 block mb-1">👤 Cliente</label>
+            <div class="relative">
+              <input type="text" id="editClientSearch" 
+                     placeholder="Buscar cliente por nombre..." 
+                     class="w-full border border-gray-300 rounded-xl p-3 bg-white" 
+                     autocomplete="off" 
+                     value="${state.editSelectedClient?.nombre || state.editingOrder.nombre_cliente || ''}">
+              <div id="editClientDropdown" class="search-dropdown" style="display: none;"></div>
+            </div>
+            <button onclick="openNewClientModalFromEdit()" class="text-xs text-teal-600 mt-2">+ Crear nuevo cliente</button>
+          </div>
+          
+          <div class="bg-gray-50 rounded-xl p-3 border">
+            <label class="text-sm font-bold text-gray-700 block mb-1">📝 Comentarios</label>
+            <textarea id="editObservacionOrder" rows="2" placeholder="Notas adicionales..." 
+                      class="w-full border border-gray-300 rounded-xl p-3 bg-white">${state.editObservacion}</textarea>
+          </div>
+          
+          <div class="bg-gray-50 rounded-xl p-3 border">
+            <label class="text-sm font-bold text-gray-700 block mb-1">➕ Agregar producto</label>
+            <div class="relative">
+              <input type="text" id="editProductSearch" 
+                     placeholder="🔍 Buscar por nombre o código..." 
+                     class="w-full border border-gray-300 rounded-xl p-3 bg-white" 
+                     autocomplete="off">
+              <div id="editProductDropdown" class="search-dropdown" style="display: none;"></div>
+            </div>
+          </div>
+          
+          <div>
+            <h3 class="font-bold text-md mb-2 flex items-center gap-2">🛒 Productos en el pedido <span class="text-xs text-gray-400">(${state.editCart.length})</span></h3>
+            ${state.editCart.length === 0 ? 
+              '<p class="text-center text-gray-400 py-6 bg-gray-50 rounded-xl">No hay productos en este pedido</p>' : 
+              state.editCart.map((item, idx) => {
+                const currentPrice = item.unitPrice || item.product.precio;
+                return `
+                  <div class="bg-white rounded-xl p-3 shadow-sm border mb-2">
+                    <div class="flex justify-between items-start">
+                      <div class="flex-1">
+                        <p class="font-bold">${item.product.nombre}</p>
+                        <p class="text-xs text-gray-400">Cód: ${item.product.código}</p>
+                        <div class="flex flex-wrap gap-2 mt-2 items-center">
+                          <div class="flex items-center gap-1">
+                            <span class="text-xs text-gray-500">Precio:</span>
+                            <input type="number" value="${currentPrice}" 
+                                   class="w-24 text-sm border rounded-lg px-2 py-1 text-right" 
+                                   onchange="updateEditCartPrice(${idx}, this.value)" 
+                                   step="100">
+                          </div>
+                          <div class="flex items-center gap-1">
+                            <span class="text-xs text-gray-500">Cant:</span>
+                            <span class="font-bold min-w-[40px] text-center">${item.quantity}</span>
+                            <button onclick="openEditQuantityModal(${idx})" 
+                                    class="text-xs bg-blue-100 hover:bg-blue-200 px-2 py-1 rounded-lg transition">
+                              ✏️ Editar
+                            </button>
+                          </div>
+                          <button onclick="removeFromEditCart(${idx})" 
+                                  class="text-xs bg-red-100 hover:bg-red-200 px-2 py-1 rounded-lg text-red-600 transition">
+                            🗑️ Eliminar
+                          </button>
+                        </div>
+                      </div>
+                      <div class="text-right">
+                        <p class="font-bold text-teal-600">$${(item.quantity * currentPrice).toLocaleString()}</p>
+                      </div>
+                    </div>
+                  </div>
+                `;
+              }).join('')
+            }
+          </div>
+        </div>
+        
+        <div class="p-4 border-t bg-white sticky bottom-0 shadow-lg">
+          <div class="flex justify-between items-center mb-3">
+            <span class="font-bold text-lg">Total del pedido:</span>
+            <span class="text-2xl font-bold text-teal-600">$${cartTotal.toLocaleString()}</span>
+          </div>
+          <div class="flex gap-3">
+            <button onclick="eliminarPedidoDesdeEdicion('${state.editingOrder.id_pedido}')" 
+                    class="flex-1 bg-red-600 hover:bg-red-700 text-white py-3 rounded-xl font-bold text-lg transition" 
+                    ${state.loadingButtons.eliminarPedido ? 'disabled' : ''}>
+              ${state.loadingButtons.eliminarPedido ? '<span class="spinner"></span>Eliminando...' : '🗑️ Eliminar Pedido'}
+            </button>
+            <button onclick="guardarEdicionPedido()" 
+                    class="flex-1 bg-green-600 hover:bg-green-700 text-white py-3 rounded-xl font-bold text-lg transition"
+                    ${state.loadingButtons.editarPedido ? 'disabled' : ''}>
+              ${state.loadingButtons.editarPedido ? '<span class="spinner"></span>Guardando...' : '💾 Guardar Cambios'}
+            </button>
+            <button onclick="closeEditOrderModal()" 
+                    class="flex-1 bg-gray-200 hover:bg-gray-300 py-3 rounded-xl font-bold text-lg transition">
+              Cancelar
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderEditQuantityModal() {
+    return `
+      <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl max-w-md w-full">
+          <div class="p-4 border-b flex justify-between items-center">
+            <h2 class="font-bold text-lg">✏️ Editar cantidad</h2>
+            <button onclick="closeEditQuantityModal()" class="text-2xl text-gray-400">✕</button>
+          </div>
+          <div class="p-6">
+            <div class="text-center mb-6">
+              <div class="text-7xl font-bold text-teal-600 border-b-4 border-teal-600 pb-2 inline-block px-8">
+                ${state.editNumValue}
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-2 max-w-xs mx-auto">
+              ${[1,2,3,4,5,6,7,8,9,'.',0,'del'].map(k => `
+                <button onclick="handleEditQuantityKeypad('${k}')" 
+                        class="h-16 text-2xl font-bold bg-gray-100 rounded-xl active:bg-gray-200 hover:bg-gray-200 transition">
+                  ${k === 'del' ? '⌫' : k}
+                </button>
+              `).join('')}
+            </div>
+            <button onclick="saveEditQuantity()" 
+                    class="w-full bg-teal-600 text-white py-3 rounded-xl font-bold text-lg mt-6">
+              ✓ Guardar cantidad
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function setupEditClientSearch() {
+    const input = document.getElementById('editClientSearch');
+    if (!input) return;
+    
+    const updateDropdown = () => {
+      const searchText = input.value.toLowerCase();
+      const filtered = state.clientes.filter(c => 
+        (c.nombre || '').toLowerCase().includes(searchText)
+      ).slice(0, 8);
+      
+      const dropdown = document.getElementById('editClientDropdown');
+      if (dropdown && searchText.length > 0 && filtered.length > 0) {
+        dropdown.innerHTML = filtered.map(c => `
+          <button onclick="selectEditClient(${c.id}, '${c.nombre.replace(/'/g, "\\'")}', '${(c.telefono || '').replace(/'/g, "\\'")}')" 
+                  class="w-full text-left p-3 hover:bg-gray-50 border-b last:border-b-0">
+            <div class="font-medium">${c.nombre}</div>
+            <div class="text-xs text-gray-400">📞 ${c.telefono || 'Sin teléfono'}</div>
+          </button>
+        `).join('');
+        dropdown.style.display = 'block';
+      } else if (dropdown) {
+        dropdown.style.display = 'none';
+      }
+    };
+    
+    input.removeEventListener('input', updateDropdown);
+    input.addEventListener('input', updateDropdown);
+    input.addEventListener('focus', updateDropdown);
+    
+    document.removeEventListener('click', window._closeClientDropdown);
+    window._closeClientDropdown = (e) => {
+      const dropdown = document.getElementById('editClientDropdown');
+      if (dropdown && !input.contains(e.target) && !dropdown.contains(e.target)) {
+        dropdown.style.display = 'none';
+      }
+    };
+    document.addEventListener('click', window._closeClientDropdown);
+  }
+
+  function setupEditProductSearch() {
+    const input = document.getElementById('editProductSearch');
+    if (!input) return;
+    
+    const updateDropdown = () => {
+      const searchText = input.value.toLowerCase();
+      const filtered = state.productos.filter(p => 
+        (p.nombre || '').toLowerCase().includes(searchText) || 
+        (p.código || '').toLowerCase().includes(searchText)
+      ).slice(0, 10);
+      
+      const dropdown = document.getElementById('editProductDropdown');
+      if (dropdown && searchText.length > 0 && filtered.length > 0) {
+        dropdown.innerHTML = filtered.map(p => `
+          <button onclick="addProductToEditCart('${p.código}')" 
+                  class="w-full text-left p-3 hover:bg-gray-50 border-b last:border-b-0">
+            <div class="flex justify-between items-center">
+              <div>
+                <div class="font-medium">${p.nombre}</div>
+                <div class="text-xs text-gray-400">Cód: ${p.código} | Stock: ${p.stock || 0}</div>
+              </div>
+              <div class="text-teal-600 font-bold text-lg">$${Number(p.precio).toLocaleString()}</div>
+            </div>
+          </button>
+        `).join('');
+        dropdown.style.display = 'block';
+      } else if (dropdown) {
+        dropdown.style.display = 'none';
+      }
+    };
+    
+    input.removeEventListener('input', updateDropdown);
+    input.addEventListener('input', updateDropdown);
+    input.addEventListener('focus', updateDropdown);
+    
+    document.removeEventListener('click', window._closeProductDropdown);
+    window._closeProductDropdown = (e) => {
+      const dropdown = document.getElementById('editProductDropdown');
+      if (dropdown && !input.contains(e.target) && !dropdown.contains(e.target)) {
+        dropdown.style.display = 'none';
+      }
+    };
+    document.addEventListener('click', window._closeProductDropdown);
+  }
+
+  window.selectEditClient = (id, nombre, telefono) => {
+    state.editSelectedClient = { id, nombre, telefono };
+    const input = document.getElementById('editClientSearch');
+    if (input) input.value = nombre;
+    const dropdown = document.getElementById('editClientDropdown');
+    if (dropdown) dropdown.style.display = 'none';
+    render();
+  };
+
+  window.openNewClientModalFromEdit = () => {
+    state.showNewClientModal = true;
+    state.newClientCallback = (client) => {
+      state.editSelectedClient = client;
+      const input = document.getElementById('editClientSearch');
+      if (input) input.value = client.nombre;
+    };
+    render();
+  };
+
+  window.addProductToEditCart = (code) => {
+    const product = state.productos.find(p => p.código === code);
+    if (product) {
+      state.editSelectedProduct = product;
+      state.editNumValue = '1';
+      state.showEditQuantityModal = true;
+      const input = document.getElementById('editProductSearch');
+      if (input) input.value = '';
+      const dropdown = document.getElementById('editProductDropdown');
+      if (dropdown) dropdown.style.display = 'none';
+      render();
+    }
+  };
+
+  window.openEditQuantityModal = (idx) => {
+    state.editingEditCartIndex = idx;
+    state.editNumValue = state.editCart[idx].quantity.toString();
+    state.showEditQuantityModal = true;
+    render();
+  };
+
+  window.handleEditQuantityKeypad = (key) => {
+    if (key === 'del') {
+      state.editNumValue = state.editNumValue.length > 1 ? state.editNumValue.slice(0, -1) : '0';
+    } else if (key === '.') {
+      if (!state.editNumValue.includes('.')) state.editNumValue = state.editNumValue + '.';
+    } else {
+      let newVal = state.editNumValue === '0' ? key : state.editNumValue + key;
+      if (parseFloat(newVal) <= 999999) state.editNumValue = newVal;
+    }
+    render();
+  };
+
+  window.saveEditQuantity = () => {
+    let qty = parseFloat(state.editNumValue);
+    if (isNaN(qty) || qty <= 0) {
+      alert('Cantidad inválida');
+      return;
+    }
+    
+    if (state.editSelectedProduct) {
+      const existing = state.editCart.find(i => i.product.código === state.editSelectedProduct.código);
+      if (existing) {
+        existing.quantity += qty;
+      } else {
+        state.editCart.push({ 
+          product: state.editSelectedProduct, 
+          quantity: qty,
+          unitPrice: state.editSelectedProduct.precio
+        });
+      }
+      state.editSelectedProduct = null;
+    } else if (state.editingEditCartIndex !== null) {
+      state.editCart[state.editingEditCartIndex].quantity = qty;
+      state.editingEditCartIndex = null;
+    }
+    
+    state.showEditQuantityModal = false;
+    render();
+  };
+
+  window.closeEditQuantityModal = () => {
+    state.showEditQuantityModal = false;
+    state.editSelectedProduct = null;
+    state.editingEditCartIndex = null;
+    render();
+  };
+
+  window.updateEditCartPrice = (index, newPrice) => {
+    let price = parseFloat(newPrice);
+    if (!isNaN(price) && price > 0) {
+      state.editCart[index].unitPrice = price;
+      render();
+    } else {
+      alert('Precio inválido');
+    }
+  };
+
+  window.removeFromEditCart = (idx) => {
+    if (confirm('¿Eliminar este producto del pedido?')) {
+      state.editCart.splice(idx, 1);
+      render();
+    }
+  };
+
+  window.closeEditOrderModal = () => {
+    state.showEditOrderModal = false;
+    state.editingOrder = null;
+    state.editingOrderDetails = [];
+    state.editingOrderOldData = null;
+    state.editCart = [];
+    state.editSelectedClient = null;
+    state.editSelectedProduct = null;
+    state.editingEditCartIndex = null;
+    state.showEditQuantityModal = false;
+    render();
+  };
+
+  window.abrirEditarPedido = (id) => {
+    const order = state.pedidos.find(p => p.id_pedido === id);
+    const details = state.detalles_pedido.filter(d => d.id_pedido === id);
+    
+    if (!order) {
+      alert('Pedido no encontrado');
+      return;
+    }
+    
+    if (order.estado !== 'Pendiente') {
+      alert('Solo se pueden editar pedidos en estado "Pendiente"');
+      return;
+    }
+    
+    state.editingOrder = order;
+    state.editingOrderDetails = [...details];
+    state.editingOrderOldData = JSON.parse(JSON.stringify(order));
+    state.editCart = details.map(d => ({
+      product: { 
+        código: d.codigo_producto, 
+        nombre: d.nombre_producto, 
+        precio: d.precio_unitario 
+      },
+      quantity: d.cantidad,
+      unitPrice: d.precio_unitario
+    }));
+    state.editObservacion = order.observacion || '';
+    state.editSelectedClient = { 
+      id: order.id_cliente, 
+      nombre: order.nombre_cliente 
+    };
+    state.showEditOrderModal = true;
+    render();
+  };
+
+  function renderCartModal() {
+    const cartTotal = state.cart.reduce((s, i) => s + ((i.unitPrice || i.product.precio) * i.quantity), 0);
+    return `
+      <div class="fixed inset-0 bg-white z-50 flex flex-col">
+        <div class="p-4 border-b flex justify-between items-center"><h2 class="font-bold text-lg">🛒 Carrito</h2><button onclick="closeCart()" class="text-2xl text-gray-400">✕</button></div>
+        <div class="flex-1 overflow-auto p-4 space-y-3">
+          ${state.cart.map((item, idx) => {
+            const currentPrice = item.unitPrice || item.product.precio;
+            return `
+              <div class="flex justify-between items-center border-b pb-3">
+                <div class="flex-1">
+                  <p class="font-bold">${item.product.nombre}</p>
+                  <div class="flex gap-2 mt-1 items-center flex-wrap">
+                    <input type="number" id="price_${idx}" value="${currentPrice}" class="w-28 text-sm border rounded px-2 py-1" onchange="updateCartPrice(${idx}, this.value)" step="100">
+                    <span class="text-sm text-gray-500">×</span>
+                    <span class="font-bold">${item.quantity}</span>
+                    <button onclick="openEditCart(${idx})" class="text-xs text-blue-500 ml-2">Editar cantidad</button>
+                  </div>
+                </div>
+                <div class="text-right">
+                  <p class="font-bold">$${(item.quantity * currentPrice).toLocaleString()}</p>
+                  <button onclick="removeFromCart(${idx})" class="text-xs text-red-500 mt-1">Eliminar</button>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+        <div class="p-4 border-t"><div class="flex justify-between mb-4"><span class="font-bold text-lg">Total</span><span class="text-2xl font-bold text-teal-600">$${cartTotal.toLocaleString()}</span></div><button onclick="openPayment()" class="w-full bg-teal-600 text-white py-3 rounded-xl font-bold text-lg">Continuar →</button></div>
+      </div>
+    `;
+  }
+
+  function renderPaymentModal() {
+    const cartTotal = state.cart.reduce((s, i) => s + ((i.unitPrice || i.product.precio) * i.quantity), 0);
+    const proximaFactura = state.configNumeracion?.ultimoNumero + 1 || 1001;
+    return `
+      <div class="fixed inset-0 bg-white z-50 flex flex-col">
+        <div class="p-4 border-b flex justify-between items-center"><h2 class="font-bold text-lg">💵 Finalizar Venta</h2><button onclick="closePayment()" class="text-2xl text-gray-400">✕</button></div>
+        <div class="flex-1 overflow-auto p-4">
+          <div class="text-center mb-6">
+            <p class="text-gray-500 text-sm">Total a pagar</p>
+            <p class="text-4xl font-bold text-teal-600">$${cartTotal.toLocaleString()}</p>
+            <p class="text-xs text-gray-400 mt-2">Factura #: <strong>${proximaFactura}</strong></p>
+          </div>
+          <div class="mb-4"><label class="text-sm font-bold block mb-1">📝 Comentarios</label><textarea id="observacionFinal" rows="3" class="w-full border border-gray-300 rounded-xl p-3 bg-white" placeholder="Notas de la venta...">${state.observacion}</textarea></div>
+        </div>
+        <div class="p-4 border-t">
+          <button onclick="completeSale()" class="w-full bg-green-500 text-white py-3 rounded-xl font-bold text-lg" ${state.loadingButtons.registrarVenta ? 'disabled' : ''}>
+            ${state.loadingButtons.registrarVenta ? '<span class="spinner"></span>Procesando...' : '✓ COMPLETAR VENTA'}
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderQuantityModal() {
+    const product = state.selectedProduct;
+    return `
+      <div class="fixed inset-0 bg-white z-50 flex flex-col">
+        <div class="p-4 border-b flex justify-between items-center"><h2 class="font-bold text-lg">${product?.nombre}</h2><button onclick="closeQuantityModal()" class="text-2xl text-gray-400">✕</button></div>
+        <div class="flex-1 flex items-center justify-center"><div class="text-7xl font-bold text-teal-600 border-b-4 border-teal-600 pb-2 px-8">${state.numValue}</div></div>
+        <div class="p-4 grid grid-cols-3 gap-2 max-w-md mx-auto w-full">${[1,2,3,4,5,6,7,8,9,',',0,'del'].map(k => `<button onclick="handleKeypad('${k}')" class="h-16 text-2xl font-bold bg-gray-100 rounded-xl active:bg-gray-200">${k === 'del' ? '⌫' : k}</button>`).join('')}</div>
+        <div class="p-4"><button onclick="addToCartFromModal()" class="w-full bg-teal-600 text-white py-3 rounded-xl font-bold text-lg">Agregar al carrito</button></div>
+      </div>
+    `;
+  }
+
+  function renderEditCartModal() {
+    const item = state.cart[state.editingCartIndex];
+    if (!item) return '';
+    return `
+      <div class="fixed inset-0 bg-white z-50 flex flex-col">
+        <div class="p-4 border-b flex justify-between items-center"><h2 class="font-bold">Editar ${item.product.nombre}</h2><button onclick="closeEditCart()" class="text-2xl text-gray-400">✕</button></div>
+        <div class="p-4"><label class="font-bold block mb-2">Cantidad:</label><div class="text-6xl font-bold text-teal-600 border-b-4 border-teal-600 pb-2 px-8 text-center">${state.editQuantityValue}</div></div>
+        <div class="p-4 grid grid-cols-3 gap-2">${[1,2,3,4,5,6,7,8,9,',',0,'del'].map(k => `<button onclick="handleEditKeypad('${k}')" class="h-16 text-2xl font-bold bg-gray-100 rounded-xl">${k === 'del' ? '⌫' : k}</button>`).join('')}</div>
+        <div class="p-4"><button onclick="saveEditCart()" class="w-full bg-teal-600 text-white py-3 rounded-xl font-bold">Guardar</button></div>
+      </div>
+    `;
+  }
+
+  function renderOrderDetailModal() {
+    const order = state.pedidos.find(p => p.id_pedido === state.selectedOrderId);
+    const detalles = state.detalles_pedido.filter(d => d.id_pedido === state.selectedOrderId);
+    if (!order) return '';
+    const facturaNumero = order.numero_factura || order.id_pedido;
+    return `
+      <div class="fixed inset-0 bg-white z-50 flex flex-col">
+        <div class="p-4 border-b flex justify-between items-center"><h2 class="font-bold">Factura #${facturaNumero}</h2><button onclick="closeOrderDetail()" class="text-2xl">✕</button></div>
+        <div class="flex-1 overflow-auto p-4">
+          <div class="bg-gray-50 p-4 rounded-xl mb-4">
+            <p class="text-gray-500 text-sm">Cliente</p><p class="font-bold">${order.nombre_cliente}</p>
+            <p class="text-gray-500 text-sm mt-2">Total</p><p class="text-2xl font-bold text-teal-600">$${Number(order.total).toLocaleString()}</p>
+            <p class="text-gray-500 text-sm mt-2">Estado</p><span class="inline-block px-3 py-1 rounded-full text-xs ${order.estado === 'Pendiente' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}">${order.estado}</span>
+            <p class="text-gray-500 text-sm mt-2">Fecha y Hora</p><p>${formatFecha(order.fecha)}</p>
+            <p class="text-gray-500 text-sm mt-2">Vendedor</p><p>${order.nombre_vendedor || 'Sin vendedor'}</p>
+            <p class="text-gray-500 text-sm mt-2">ID Interno</p><p class="text-xs font-mono">${order.id_pedido}</p>
+            ${order.observacion ? `<p class="text-gray-500 text-sm mt-2">Comentarios</p><p class="text-sm">${order.observacion}</p>` : ''}
+          </div>
+          <h3 class="font-bold mb-2">Productos</h3>${detalles.map(d => `<div class="flex justify-between py-2 border-b"><div><p class="font-medium">${d.nombre_producto}</p><p class="text-xs text-gray-500">${d.cantidad} x $${Number(d.precio_unitario).toLocaleString()}</p></div><p class="font-bold">$${Number(d.subtotal).toLocaleString()}</p></div>`).join('')}
+        </div>
+        <div class="p-4 border-t flex gap-2"><button onclick="mostrarOpcionesImpresion('${order.id_pedido}')" class="flex-1 bg-blue-500 text-white py-3 rounded-xl font-bold">🖨️ Imprimir</button><button onclick="closeOrderDetail()" class="flex-1 bg-gray-200 py-3 rounded-xl font-bold">Cerrar</button></div>
+      </div>
+    `;
+  }
+
+  function renderPrintModal() {
+    if (!state.lastOrderData) return '';
+    const { order, detalles } = state.lastOrderData;
+    const facturaNumero = order.numero_factura || order.id_pedido;
+    return `
+      <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl max-w-md w-full max-h-[90vh] overflow-auto">
+          <div class="print-area p-6">
+            <div class="text-center border-b pb-4 mb-4">
+              <h2 class="font-bold text-xl">🐟 Cotilpez S.A.S.</h2>
+              <p class="text-sm text-gray-500">NIT: 900.000.000-0</p>
+              <p class="text-sm text-gray-500">Factura de Venta</p>
+              <p class="text-xs text-gray-400 mt-2">Factura #${facturaNumero}</p>
+              <p class="text-xs text-gray-400">${formatFecha(order.fecha)}</p>
+            </div>
+            <div class="mb-4">
+              <p class="text-sm font-bold">Cliente:</p>
+              <p class="text-sm">${order.nombre_cliente}</p>
+              <p class="text-sm font-bold mt-2">Vendedor:</p>
+              <p class="text-sm">${order.nombre_vendedor || 'Sin vendedor'}</p>
+            </div>
+            <table class="w-full text-sm mb-4">
+              <thead class="border-b"><tr><th class="text-left py-2">Producto</th><th class="text-right">Cant</th><th class="text-right">Precio</th><th class="text-right">Subtotal</th></tr></thead>
+              <tbody>${detalles.map(d => `<tr class="border-b"><td class="py-2">${d.nombre_producto}</td><td class="text-right">${d.cantidad}</td><td class="text-right">$${Number(d.precio_unitario).toLocaleString()}</td><td class="text-right">$${Number(d.subtotal).toLocaleString()}</td></tr>`).join('')}</tbody>
+              <tfoot class="border-t"><tr><td colspan="3" class="pt-2 text-right font-bold">Total:</td><td class="pt-2 text-right font-bold">$${Number(order.total).toLocaleString()}</td></tr>
+            </table>
+            ${order.observacion ? `<div class="text-sm border-t pt-4 mt-4"><p class="font-bold">Comentarios:</p><p>${order.observacion}</p></div>` : ''}
+            <div class="text-center text-xs text-gray-400 border-t pt-4 mt-4">
+              <p>¡Gracias por su compra!</p>
+            </div>
+          </div>
+          <div class="p-4 border-t flex gap-2">
+            <button onclick="window.print(); closePrintModal();" class="flex-1 bg-teal-600 text-white py-2 rounded-lg">🖨️ Imprimir</button>
+            <button onclick="closePrintModal()" class="flex-1 bg-gray-200 py-2 rounded-lg">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderClientHistoryModal() {
+    const cliente = state.selectedClientForHistory;
+    const pedidosCliente = state.pedidos.filter(p => String(p.id_cliente) === String(cliente?.id));
+    return `
+      <div class="fixed inset-0 bg-white z-50 flex flex-col">
+        <div class="p-4 border-b flex justify-between items-center"><h2 class="font-bold">📜 Historial: ${cliente?.nombre}</h2><button onclick="closeClientHistory()" class="text-2xl">✕</button></div>
+        <div class="flex-1 overflow-auto p-4">
+          ${Number(cliente?.saldo_por_cobrar) > 0 ? `<div class="bg-orange-50 p-4 rounded-xl mb-4 text-center border"><p class="text-orange-700 font-bold">💰 Saldo pendiente: $${Number(cliente.saldo_por_cobrar).toLocaleString()}</p></div>` : ''}
+          ${pedidosCliente.length === 0 ? '<p class="text-gray-400 text-center py-8">Sin compras registradas</p>' : pedidosCliente.map(p => `<div class="bg-gray-50 p-3 rounded-xl mb-2"><div class="flex justify-between"><p class="font-bold">Factura #${p.numero_factura || p.id_pedido}</p><p class="text-sm">${formatFecha(p.fecha)}</p></div><div class="flex justify-between mt-1"><p>Total</p><p class="font-bold">$${Number(p.total).toLocaleString()}</p></div><p class="text-xs text-gray-500">Estado: ${p.estado}</p><p class="text-xs text-gray-500">Vendedor: ${p.nombre_vendedor || 'Sin vendedor'}</p></div>`).join('')}
+        </div>
+        <div class="p-4 border-t"><button onclick="closeClientHistory()" class="w-full bg-gray-200 py-3 rounded-xl font-bold">Cerrar</button></div>
+      </div>
+    `;
+  }
+
+  function renderNewClientModal() {
+    return `
+      <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-xl p-6 w-full max-w-md">
+          <h3 class="font-bold text-xl mb-4">➕ Nuevo Cliente</h3>
+          <input type="text" id="newClientName" placeholder="Nombre completo" class="w-full border border-gray-300 rounded-xl p-3 mb-3" autocomplete="off">
+          <input type="tel" id="newClientPhone" placeholder="Teléfono" class="w-full border border-gray-300 rounded-xl p-3 mb-4" autocomplete="off">
+          <div class="flex gap-3"><button onclick="saveNewClient()" class="flex-1 bg-teal-600 text-white py-3 rounded-xl font-bold">Guardar</button><button onclick="closeNewClientModal()" class="flex-1 bg-gray-200 py-3 rounded-xl font-bold">Cancelar</button></div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Inicializar
+  refreshData();
+</script>
+</body>
+</html>
