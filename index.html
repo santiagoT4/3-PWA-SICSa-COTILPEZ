@@ -63,7 +63,7 @@
 <div id="app" class="min-h-screen"></div>
 
 <script>
-  // ============ CONFIGURACIÓN - CAMBIA ESTA URL DESPUÉS DE DESPLEGAR ============
+  // ============ CONFIGURACIÓN ============
   const API_URL = 'https://script.google.com/macros/s/AKfycbxY_j1xt15EyFPIefSQ1XVNQ0k6L2cZMwgcETq2VgR0M8foSalcGnSnpcMOyRNqPu1aAg/exec';
   // ============================================================================
 
@@ -221,7 +221,7 @@
   
   const impresora = new ImpresoraDPP350C();
   
-  // Estado global
+  // Estado global con versionado para forzar reactividad
   let state = {
     user: null,
     productos: [],
@@ -272,6 +272,7 @@
     nuevoNumeroInicial: '',
     impresoraConectada: false,
     nombreImpresora: null,
+    dataVersion: 0,  // <-- VERSIONADO PARA FORZAR REACTIVIDAD
     loadingButtons: {
       registrarVenta: false,
       editarPedido: false,
@@ -349,6 +350,11 @@
     }
   }
 
+  // Función para clonar profundamente los datos y forzar nuevos arrays
+  function clonarDatos(data) {
+    return JSON.parse(JSON.stringify(data));
+  }
+
   async function refreshData() {
     state.loading = true;
     render();
@@ -357,16 +363,20 @@
       const resultado = await llamarAPI('getData');
       
       if (resultado.success !== false) {
-        state.productos = resultado.productos || [];
-        state.clientes = resultado.clientes || [];
-        state.pedidos = (resultado.pedidos || []).sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
-        state.detalles_pedido = resultado.detalles_pedido || [];
-        state.transacciones = resultado.transacciones || [];
-        state.estadisticas = resultado.estadisticas || [];
-        state.usuarios = resultado.usuarios || [];
-        state.configNumeracion = resultado.configNumeracion || { ultimoNumero: 1000 };
+        // CLONACIÓN PROFUNDA para romper referencias
+        state.productos = clonarDatos(resultado.productos || []);
+        state.clientes = clonarDatos(resultado.clientes || []);
+        state.pedidos = clonarDatos(resultado.pedidos || []).sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+        state.detalles_pedido = clonarDatos(resultado.detalles_pedido || []);
+        state.transacciones = clonarDatos(resultado.transacciones || []);
+        state.estadisticas = clonarDatos(resultado.estadisticas || []);
+        state.usuarios = clonarDatos(resultado.usuarios || []);
+        state.configNumeracion = clonarDatos(resultado.configNumeracion || { ultimoNumero: 1000 });
         
-        console.log('✅ Datos cargados correctamente:', {
+        // INCREMENTAR VERSIÓN para forzar recálculo en todas las funciones que dependen de los datos
+        state.dataVersion++;
+        
+        console.log('✅ Datos cargados correctamente (v' + state.dataVersion + '):', {
           productos: state.productos.length,
           clientes: state.clientes.length,
           pedidos: state.pedidos.length,
@@ -436,7 +446,7 @@
     const order = state.pedidos.find(p => p.id_pedido === orderId);
     const detalles = state.detalles_pedido.filter(d => d.id_pedido === orderId);
     if (order && detalles) {
-      state.lastOrderData = { order, detalles };
+      state.lastOrderData = { order: clonarDatos(order), detalles: clonarDatos(detalles) };
       state.showPrintModal = true;
       render();
     }
@@ -469,7 +479,7 @@
     }
   }
 
-  // ============ FUNCIONES DE NEGOCIO ============
+  // ============ FUNCIONES DE NEGOCIO CON FORZADO DE REFRESH ============
   async function confirmarPedido(id) {
     if (confirm('¿Confirmar este pedido?')) {
       setButtonLoading('confirmarPedido', true);
@@ -477,7 +487,10 @@
       setButtonLoading('confirmarPedido', false);
       if (resultado.success) {
         await refreshData();
-        alert('Pedido confirmado exitosamente');
+        // Pequeño retraso para asegurar que el estado se actualizó
+        setTimeout(() => {
+          alert('Pedido confirmado exitosamente');
+        }, 100);
       } else {
         alert('Error al confirmar: ' + (resultado.error || 'Desconocido'));
       }
@@ -831,7 +844,9 @@
     `;
   }
 
+  // ============ FUNCIÓN CORREGIDA DE PEDIDOS ============
   function filtrarOrdenarPedidos() {
+    // Crear una COPIA NUEVA del array de pedidos con spread operator
     let pedidosFiltrados = [...state.pedidos];
     
     if (state.filtroPedidos.vendedor !== 'TODOS') {
@@ -952,7 +967,9 @@
     `;
   }
 
+  // ============ FUNCIÓN CORREGIDA DE TRANSACCIONES ============
   function filtrarOrdenarTransacciones() {
+    // Crear una COPIA NUEVA del array filtrado
     let transaccionesFiltradas = [...state.pedidos.filter(p => p.estado === 'Confirmado')];
     
     if (state.filtroTransacciones.vendedor !== 'TODOS') {
@@ -1505,7 +1522,6 @@
   };
 
   // ============ EXPONER FUNCIONES CRÍTICAS AL SCOPE GLOBAL ============
-  // Estas funciones son llamadas desde los onclick del HTML
   window.confirmarPedido = confirmarPedido;
   window.eliminarPedidoDesdeEdicion = eliminarPedidoDesdeEdicion;
   window.guardarNuevoNumeroInicial = guardarNuevoNumeroInicial;
@@ -1514,8 +1530,6 @@
   window.guardarEdicionPedido = guardarEdicionPedido;
   window.conectarImpresora = conectarImpresora;
   window.mostrarOpcionesImpresion = mostrarOpcionesImpresion;
-  window.imprimirPedidoBluetooth = imprimirPedidoBluetooth;
-  window.imprimirPedidoNormal = imprimirPedidoNormal;
 
   // ============ MODALES ============
   function renderEditOrderModal() {
@@ -1880,9 +1894,9 @@
       return;
     }
     
-    state.editingOrder = order;
-    state.editingOrderDetails = [...details];
-    state.editingOrderOldData = JSON.parse(JSON.stringify(order));
+    state.editingOrder = clonarDatos(order);
+    state.editingOrderDetails = clonarDatos(details);
+    state.editingOrderOldData = clonarDatos(order);
     state.editCart = details.map(d => ({
       product: { 
         código: d.codigo_producto, 
