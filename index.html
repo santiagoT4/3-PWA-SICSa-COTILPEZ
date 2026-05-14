@@ -66,7 +66,7 @@
   // ============ CONFIGURACIÓN ============
   const API_URL = 'https://script.google.com/macros/s/AKfycbxY_j1xt15EyFPIefSQ1XVNQ0k6L2cZMwgcETq2VgR0M8foSalcGnSnpcMOyRNqPu1aAg/exec';
 
-  // ============ CAPA DE COMUNICACIÓN API ============
+  // ============ CAPA DE COMUNICACIÓN API MEJORADA ============
   const API = {
     async call(accion, payload = null) {
       try {
@@ -83,27 +83,37 @@
         if (!respuesta.ok) throw new Error(`HTTP ${respuesta.status}`);
         
         const texto = await respuesta.text();
-        if (!texto || texto.trim() === '') return { success: false, error: 'Respuesta vacía' };
+        if (!texto || texto.trim() === '') {
+          return { success: false, error: 'Respuesta vacía del servidor' };
+        }
         
-        return JSON.parse(texto);
+        const data = JSON.parse(texto);
+        // ✅ Garantizar siempre estructura consistente
+        if (typeof data !== 'object' || data === null) {
+          return { success: false, error: 'Formato inválido' };
+        }
+        return data;
       } catch (error) {
-        console.error('API Error:', error);
+        console.error(`API Error [${accion}]:`, error);
         return { success: false, error: error.message };
       }
     },
     
-    // Métodos específicos
     async getInitialData() {
       return this.call('getData');
     },
     
+    // ✅ CORREGIDO: Retorna pedidos + detalles juntos (son relacionales)
     async getPedidos() {
       const result = await this.call('getData');
-      // CORREGIDO: Asegurar que retornamos el array de pedidos
-      if (result.success && result.pedidos) {
-        return result.pedidos;
+      if (!result || !result.success) {
+        return { success: false, pedidos: [], detalles_pedido: [] };
       }
-      return [];
+      return {
+        success: true,
+        pedidos: Array.isArray(result.pedidos) ? result.pedidos : [],
+        detalles_pedido: Array.isArray(result.detalles_pedido) ? result.detalles_pedido : []
+      };
     },
     
     async registrarVenta(order, details) {
@@ -340,31 +350,107 @@
     }
   };
 
-  // ============ MÓDULO DE PEDIDOS ============
-  const PedidosModule = {
-    async cargar() {
+  // ============ MÓDULO DE DATOS CON REFRESH LIVIANO ============
+  const DataModule = {
+    async cargarTodo(mostrarLoading = true) {
+      if (mostrarLoading) {
+        AppState.loading = true;
+        render();
+      }
+      
       try {
-        const pedidosArray = await API.getPedidos();
-        // CORREGIDO: Asegurar que pedidosArray es un array
-        AppState.pedidos = Array.isArray(pedidosArray) ? pedidosArray.sort((a, b) => new Date(b.fecha) - new Date(a.fecha)) : [];
-        return true;
+        const data = await API.getInitialData();
+        
+        if (data && data.success) {
+          AppState.productos = data.productos || [];
+          AppState.clientes = data.clientes || [];
+          AppState.pedidos = this._ordenarPedidos(data.pedidos || []);
+          AppState.detalles_pedido = data.detalles_pedido || [];
+          AppState.usuarios = data.usuarios || [];
+          AppState.estadisticas = data.estadisticas || [];
+          AppState.configNumeracion = data.configNumeracion || { ultimoNumero: 1000 };
+          
+          console.log('✅ Datos sincronizados:', {
+            productos: AppState.productos.length,
+            clientes: AppState.clientes.length,
+            pedidos: AppState.pedidos.length,
+            pendientes: PedidosModule.getPendientes().length,
+            confirmados: PedidosModule.getConfirmados().length
+          });
+          return true;
+        } else {
+          console.error('Error en respuesta:', data);
+          alert('Error al cargar datos: ' + (data?.error || 'Desconocido'));
+          return false;
+        }
       } catch (error) {
-        console.error('Error cargando pedidos:', error);
+        console.error('Error cargando datos:', error);
+        alert('Error de conexión: ' + error.message);
+        return false;
+      } finally {
+        AppState.loading = false;
+        if (mostrarLoading) render();
+        setTimeout(() => autoReconectarImpresora(), 2000);
+      }
+    },
+    
+    // ✅ NUEVO: Refresh ligero (solo pedidos + detalles) - mucho más rápido
+    async recargarPedidos() {
+      try {
+        const result = await API.getPedidos();
+        if (result && result.success) {
+          AppState.pedidos = this._ordenarPedidos(result.pedidos);
+          AppState.detalles_pedido = result.detalles_pedido;
+          return true;
+        }
+        return false;
+      } catch (error) {
+        console.error('Error recargando pedidos:', error);
         return false;
       }
     },
     
+    _ordenarPedidos(pedidos) {
+      return [...pedidos].sort((a, b) => {
+        const fechaA = new Date(a.fecha).getTime() || 0;
+        const fechaB = new Date(b.fecha).getTime() || 0;
+        return fechaB - fechaA;
+      });
+    }
+  };
+
+  // ============ MÓDULO DE PEDIDOS CORREGIDO ============
+  const PedidosModule = {
+    // ✅ Normalización para evitar problemas de mayúsculas/espacios/acentos
+    _normalizarEstado(estado) {
+      return String(estado || '')
+        .trim()
+        .toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    },
+    
+    async cargar() {
+      return await DataModule.recargarPedidos();
+    },
+    
+    // ✅ CORREGIDO: Filtros tolerantes a inconsistencias del backend
     getPendientes() {
-      // CORREGIDO: Filtrar correctamente por estado "Pendiente"
-      return AppState.pedidos.filter(p => p.estado === 'Pendiente');
+      return AppState.pedidos.filter(p => 
+        this._normalizarEstado(p.estado) === 'pendiente'
+      );
     },
     
     getConfirmados() {
-      // CORREGIDO: Filtrar correctamente por estado "Confirmado"
-      return AppState.pedidos.filter(p => p.estado === 'Confirmado');
+      return AppState.pedidos.filter(p => {
+        const estado = this._normalizarEstado(p.estado);
+        return estado === 'confirmado' || estado === 'confirmada';
+      });
     },
     
+    // ✅ CORREGIDO: Update optimista + sync + transición ordenada de UI
     async confirmar(id) {
+      if (AppState.loadingButtons.confirmarPedido) return;
+      
       AppState.loadingButtons.confirmarPedido = true;
       render();
       
@@ -373,19 +459,29 @@
       AppState.loadingButtons.confirmarPedido = false;
       
       if (result && result.success) {
-        // Recargar todos los datos después de confirmar
-        await DataModule.cargarTodo();
-        render();
-        alert('✅ Pedido confirmado exitosamente');
-        // Cambiar a la pestaña de transacciones automáticamente
+        // 1) Update optimista: marca el pedido como confirmado INMEDIATAMENTE
+        const pedido = AppState.pedidos.find(p => 
+          String(p.id_pedido) === String(id)
+        );
+        if (pedido) pedido.estado = 'Confirmado';
+        
+        // 2) Sync con servidor (solo pedidos, no toda la data)
+        await DataModule.recargarPedidos();
+        
+        // 3) Cambiar tab ANTES del render final (evita doble render)
         AppState.activeTab = 'transacciones';
         render();
+        
+        // 4) Notificar al usuario al final
+        setTimeout(() => alert('✅ Pedido confirmado exitosamente'), 50);
       } else {
+        render();
         alert('❌ Error al confirmar: ' + (result?.error || 'Desconocido'));
       }
     },
     
     async eliminar(id) {
+      if (AppState.loadingButtons.eliminarPedido) return;
       if (!confirm('⚠️ ¿Eliminar este pedido? No se puede deshacer.')) return;
       
       AppState.loadingButtons.eliminarPedido = true;
@@ -396,19 +492,34 @@
       AppState.loadingButtons.eliminarPedido = false;
       
       if (result && result.success) {
-        await DataModule.cargarTodo();
+        // Update optimista
+        AppState.pedidos = AppState.pedidos.filter(p => 
+          String(p.id_pedido) !== String(id)
+        );
+        AppState.detalles_pedido = AppState.detalles_pedido.filter(d => 
+          String(d.id_pedido) !== String(id)
+        );
+        
+        // Cerrar modales relacionados
         if (AppState.showEditOrderModal) {
           AppState.showEditOrderModal = false;
           AppState.editingOrder = null;
+          AppState.editCart = [];
         }
+        
+        // Sync con servidor
+        await DataModule.recargarPedidos();
         render();
-        alert('✅ Pedido eliminado exitosamente');
+        setTimeout(() => alert('✅ Pedido eliminado exitosamente'), 50);
       } else {
+        render();
         alert('❌ Error al eliminar: ' + (result?.error || 'Desconocido'));
       }
     },
     
     async editar(payload) {
+      if (AppState.loadingButtons.editarPedido) return false;
+      
       AppState.loadingButtons.editarPedido = true;
       render();
       
@@ -417,17 +528,21 @@
       AppState.loadingButtons.editarPedido = false;
       
       if (result && result.success) {
-        await DataModule.cargarTodo();
+        // Sync con servidor (recargar solo pedidos)
+        await DataModule.recargarPedidos();
         render();
-        alert('✅ Pedido editado exitosamente');
+        setTimeout(() => alert('✅ Pedido editado exitosamente'), 50);
         return true;
       } else {
+        render();
         alert('❌ Error al guardar: ' + (result?.error || 'Desconocido'));
         return false;
       }
     },
     
     async registrar(order, details) {
+      if (AppState.loadingButtons.registrarVenta) return null;
+      
       AppState.loadingButtons.registrarVenta = true;
       render();
       
@@ -436,9 +551,18 @@
       AppState.loadingButtons.registrarVenta = false;
       
       if (result && result.success) {
-        await DataModule.cargarTodo();
+        // Sync con servidor (solo pedidos)
+        await DataModule.recargarPedidos();
+        
+        // Si el backend devuelve el número de factura, actualizar numeración local
+        if (result.numeroFactura) {
+          AppState.configNumeracion.ultimoNumero = result.numeroFactura;
+        }
+        
+        render();
         return result;
       } else {
+        render();
         alert('❌ Error al registrar: ' + (result?.error || 'Desconocido'));
         return null;
       }
@@ -508,46 +632,6 @@
         (p.nombre || '').toLowerCase().includes(searchText) || 
         (p.código || '').toLowerCase().includes(searchText)
       );
-    }
-  };
-
-  // ============ MÓDULO DE DATOS INICIALES ============
-  const DataModule = {
-    async cargarTodo() {
-      AppState.loading = true;
-      render();
-      
-      try {
-        const data = await API.getInitialData();
-        
-        if (data.success) {
-          AppState.productos = data.productos || [];
-          AppState.clientes = data.clientes || [];
-          AppState.pedidos = (data.pedidos || []).sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
-          AppState.detalles_pedido = data.detalles_pedido || [];
-          AppState.usuarios = data.usuarios || [];
-          AppState.estadisticas = data.estadisticas || [];
-          AppState.configNumeracion = data.configNumeracion || { ultimoNumero: 1000 };
-          
-          console.log('✅ Datos cargados:', {
-            productos: AppState.productos.length,
-            clientes: AppState.clientes.length,
-            pedidos: AppState.pedidos.length,
-            pendientes: AppState.pedidos.filter(p => p.estado === 'Pendiente').length,
-            confirmados: AppState.pedidos.filter(p => p.estado === 'Confirmado').length
-          });
-        } else {
-          console.error('Error en respuesta:', data);
-          alert('Error al cargar datos: ' + (data.error || 'Desconocido'));
-        }
-      } catch (error) {
-        console.error('Error cargando datos:', error);
-        alert('Error de conexión: ' + error.message);
-      }
-      
-      AppState.loading = false;
-      render();
-      setTimeout(() => autoReconectarImpresora(), 2000);
     }
   };
 
@@ -666,6 +750,7 @@
     render();
   }
   
+  // ✅ finalizarVenta corregido - Sin doble render
   async function finalizarVenta() {
     const cartTotal = AppState.cart.reduce((s, i) => s + (i.unitPrice * i.quantity), 0);
     const observacionFinal = document.getElementById('observacionFinal')?.value || AppState.observacion;
@@ -697,15 +782,21 @@
     const result = await PedidosModule.registrar(order, details);
     
     if (result && result.success) {
+      // Limpiar carrito y estado de venta
       AppState.cart = [];
       AppState.showPayment = false;
+      AppState.showCart = false;
       AppState.selectedClient = null;
       AppState.selectedClientName = '';
       AppState.observacion = '';
-      alert(`✅ Venta registrada con Factura #${result.numeroFactura}`);
-      // Cambiar automáticamente a la pestaña de pedidos para ver el pedido pendiente
+      
+      // ✅ Cambiar tab ANTES del render para evitar parpadeos
       AppState.activeTab = 'pedidos';
       render();
+      
+      setTimeout(() => {
+        alert(`✅ Venta registrada con Factura #${result.numeroFactura}`);
+      }, 50);
     }
   }
 
