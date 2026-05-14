@@ -99,7 +99,11 @@
     
     async getPedidos() {
       const result = await this.call('getData');
-      return result.pedidos || [];
+      // CORREGIDO: Asegurar que retornamos el array de pedidos
+      if (result.success && result.pedidos) {
+        return result.pedidos;
+      }
+      return [];
     },
     
     async registrarVenta(order, details) {
@@ -111,7 +115,7 @@
     },
     
     async eliminarPedido(pedidoId) {
-      return this.call('eliminarPedido', pedidoId);
+      return this.call('eliminarPedido', { pedidoId });
     },
     
     async editarPedido(payload) {
@@ -340,9 +344,9 @@
   const PedidosModule = {
     async cargar() {
       try {
-        const result = await API.getPedidos();
-        AppState.pedidos = result.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
-        AppState.detalles_pedido = result.detalles_pedido || [];
+        const pedidosArray = await API.getPedidos();
+        // CORREGIDO: Asegurar que pedidosArray es un array
+        AppState.pedidos = Array.isArray(pedidosArray) ? pedidosArray.sort((a, b) => new Date(b.fecha) - new Date(a.fecha)) : [];
         return true;
       } catch (error) {
         console.error('Error cargando pedidos:', error);
@@ -351,10 +355,12 @@
     },
     
     getPendientes() {
+      // CORREGIDO: Filtrar correctamente por estado "Pendiente"
       return AppState.pedidos.filter(p => p.estado === 'Pendiente');
     },
     
     getConfirmados() {
+      // CORREGIDO: Filtrar correctamente por estado "Confirmado"
       return AppState.pedidos.filter(p => p.estado === 'Confirmado');
     },
     
@@ -366,12 +372,16 @@
       
       AppState.loadingButtons.confirmarPedido = false;
       
-      if (result.success) {
-        await this.cargar();
+      if (result && result.success) {
+        // Recargar todos los datos después de confirmar
+        await DataModule.cargarTodo();
         render();
-        alert('Pedido confirmado exitosamente');
+        alert('✅ Pedido confirmado exitosamente');
+        // Cambiar a la pestaña de transacciones automáticamente
+        AppState.activeTab = 'transacciones';
+        render();
       } else {
-        alert('Error al confirmar: ' + (result.error || 'Desconocido'));
+        alert('❌ Error al confirmar: ' + (result?.error || 'Desconocido'));
       }
     },
     
@@ -385,8 +395,8 @@
       
       AppState.loadingButtons.eliminarPedido = false;
       
-      if (result.success) {
-        await this.cargar();
+      if (result && result.success) {
+        await DataModule.cargarTodo();
         if (AppState.showEditOrderModal) {
           AppState.showEditOrderModal = false;
           AppState.editingOrder = null;
@@ -394,7 +404,7 @@
         render();
         alert('✅ Pedido eliminado exitosamente');
       } else {
-        alert('❌ Error al eliminar: ' + (result.error || 'Desconocido'));
+        alert('❌ Error al eliminar: ' + (result?.error || 'Desconocido'));
       }
     },
     
@@ -406,13 +416,13 @@
       
       AppState.loadingButtons.editarPedido = false;
       
-      if (result.success) {
-        await this.cargar();
+      if (result && result.success) {
+        await DataModule.cargarTodo();
         render();
         alert('✅ Pedido editado exitosamente');
         return true;
       } else {
-        alert('Error al guardar: ' + (result.error || 'Desconocido'));
+        alert('❌ Error al guardar: ' + (result?.error || 'Desconocido'));
         return false;
       }
     },
@@ -425,11 +435,11 @@
       
       AppState.loadingButtons.registrarVenta = false;
       
-      if (result.success) {
-        await this.cargar();
+      if (result && result.success) {
+        await DataModule.cargarTodo();
         return result;
       } else {
-        alert('Error al registrar: ' + (result.error || 'Desconocido'));
+        alert('❌ Error al registrar: ' + (result?.error || 'Desconocido'));
         return null;
       }
     }
@@ -440,7 +450,7 @@
     async cargar() {
       try {
         const data = await API.getInitialData();
-        AppState.clientes = data.clientes || [];
+        AppState.clientes = (data.success && data.clientes) ? data.clientes : [];
         return true;
       } catch (error) {
         console.error('Error cargando clientes:', error);
@@ -450,7 +460,7 @@
     
     async crear(nombre, telefono) {
       const result = await API.crearCliente(nombre, telefono);
-      if (result.success) {
+      if (result && result.success) {
         await this.cargar();
         return result;
       }
@@ -475,7 +485,7 @@
     async cargar() {
       try {
         const data = await API.getInitialData();
-        AppState.productos = data.productos || [];
+        AppState.productos = (data.success && data.productos) ? data.productos : [];
         return true;
       } catch (error) {
         console.error('Error cargando productos:', error);
@@ -510,19 +520,26 @@
       try {
         const data = await API.getInitialData();
         
-        AppState.productos = data.productos || [];
-        AppState.clientes = data.clientes || [];
-        AppState.pedidos = (data.pedidos || []).sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
-        AppState.detalles_pedido = data.detalles_pedido || [];
-        AppState.usuarios = data.usuarios || [];
-        AppState.estadisticas = data.estadisticas || [];
-        AppState.configNumeracion = data.configNumeracion || { ultimoNumero: 1000 };
-        
-        console.log('✅ Datos cargados:', {
-          productos: AppState.productos.length,
-          clientes: AppState.clientes.length,
-          pedidos: AppState.pedidos.length
-        });
+        if (data.success) {
+          AppState.productos = data.productos || [];
+          AppState.clientes = data.clientes || [];
+          AppState.pedidos = (data.pedidos || []).sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+          AppState.detalles_pedido = data.detalles_pedido || [];
+          AppState.usuarios = data.usuarios || [];
+          AppState.estadisticas = data.estadisticas || [];
+          AppState.configNumeracion = data.configNumeracion || { ultimoNumero: 1000 };
+          
+          console.log('✅ Datos cargados:', {
+            productos: AppState.productos.length,
+            clientes: AppState.clientes.length,
+            pedidos: AppState.pedidos.length,
+            pendientes: AppState.pedidos.filter(p => p.estado === 'Pendiente').length,
+            confirmados: AppState.pedidos.filter(p => p.estado === 'Confirmado').length
+          });
+        } else {
+          console.error('Error en respuesta:', data);
+          alert('Error al cargar datos: ' + (data.error || 'Desconocido'));
+        }
       } catch (error) {
         console.error('Error cargando datos:', error);
         alert('Error de conexión: ' + error.message);
@@ -623,12 +640,12 @@
     
     AppState.loadingButtons.actualizarNumeracion = false;
     
-    if (result.success) {
+    if (result && result.success) {
       alert(`✅ Número inicial actualizado a: ${result.nuevoNumero}`);
       AppState.showConfigNumeracionModal = false;
       await DataModule.cargarTodo();
     } else {
-      alert('Error al actualizar: ' + (result.error || 'Desconocido'));
+      alert('Error al actualizar: ' + (result?.error || 'Desconocido'));
     }
   }
 
@@ -679,13 +696,16 @@
     
     const result = await PedidosModule.registrar(order, details);
     
-    if (result) {
+    if (result && result.success) {
       AppState.cart = [];
       AppState.showPayment = false;
       AppState.selectedClient = null;
       AppState.selectedClientName = '';
       AppState.observacion = '';
       alert(`✅ Venta registrada con Factura #${result.numeroFactura}`);
+      // Cambiar automáticamente a la pestaña de pedidos para ver el pedido pendiente
+      AppState.activeTab = 'pedidos';
+      render();
     }
   }
 
@@ -770,11 +790,6 @@
       return `${fecha.getFullYear()}-${String(fecha.getMonth()+1).padStart(2,'0')}-${String(fecha.getDate()).padStart(2,'0')} ${String(fecha.getHours()).padStart(2,'0')}:${String(fecha.getMinutes()).padStart(2,'0')}`;
     }
     return String(fecha);
-  }
-
-  function setButtonLoading(buttonName, isLoading) {
-    AppState.loadingButtons[buttonName] = isLoading;
-    render();
   }
 
   function render() {
@@ -885,6 +900,7 @@
     const today = new Date().toISOString().split('T')[0];
     const todayStats = AppState.estadisticas.find(s => s.fecha === today) || { facturacion: 0, ventas: 0 };
     const pendingOrders = PedidosModule.getPendientes().length;
+    const confirmedOrders = PedidosModule.getConfirmados().length;
     return `
       <div class="space-y-4">
         <div class="bg-gradient-to-r from-teal-600 to-teal-700 rounded-xl p-5 text-white">
@@ -894,7 +910,7 @@
         <div class="grid grid-cols-2 gap-3">
           <div class="bg-white rounded-xl p-4 shadow-sm border"><p class="text-gray-500 text-xs">📊 Ventas Hoy</p><p class="text-xl font-bold text-teal-600">$${todayStats.facturacion?.toLocaleString() || 0}</p></div>
           <div class="bg-white rounded-xl p-4 shadow-sm border"><p class="text-gray-500 text-xs">📋 Pedidos Pendientes</p><p class="text-xl font-bold text-orange-500">${pendingOrders}</p></div>
-          <div class="bg-white rounded-xl p-4 shadow-sm border"><p class="text-gray-500 text-xs">📦 Productos</p><p class="text-xl font-bold">${AppState.productos.length}</p></div>
+          <div class="bg-white rounded-xl p-4 shadow-sm border"><p class="text-gray-500 text-xs">✅ Pedidos Confirmados</p><p class="text-xl font-bold text-green-500">${confirmedOrders}</p></div>
           <div class="bg-white rounded-xl p-4 shadow-sm border"><p class="text-gray-500 text-xs">👥 Clientes</p><p class="text-xl font-bold">${AppState.clientes.length}</p></div>
         </div>
         <button onclick="setActiveTab('vender')" class="w-full bg-teal-600 text-white py-4 rounded-xl font-bold shadow-lg">➕ Nueva Venta</button>
@@ -988,11 +1004,16 @@
     return `
       <div class="space-y-4">
         <h2 class="font-bold text-lg">💰 Transacciones Confirmadas (${transacciones.length})</h2>
-        ${transacciones.length === 0 ? '<p class="text-center text-gray-400 py-8 bg-white rounded-xl">No hay transacciones</p>' : transacciones.map(p => `
+        ${transacciones.length === 0 ? '<p class="text-center text-gray-400 py-8 bg-white rounded-xl">No hay transacciones confirmadas</p>' : transacciones.map(p => `
           <div class="bg-white rounded-xl p-4 shadow-sm border">
-            <div class="flex justify-between"><span class="font-bold">${p.nombre_cliente}</span><span class="text-teal-600 font-bold">$${Number(p.total).toLocaleString()}</span></div>
-            <p class="text-xs text-gray-400">Factura #${p.numero_factura || p.id_pedido} | 📅 ${formatFecha(p.fecha)}</p>
-            <div class="flex gap-2 mt-3"><button onclick="verDetallePedido('${p.id_pedido}')" class="flex-1 bg-gray-100 py-2 rounded-lg text-sm">Ver</button><button onclick="mostrarOpcionesImpresion('${p.id_pedido}')" class="flex-1 bg-blue-500 text-white py-2 rounded-lg text-sm">🖨️ Imprimir</button></div>
+            <div class="flex justify-between items-start">
+              <div><span class="font-bold">${p.nombre_cliente}</span><p class="text-xs text-gray-400">Factura #${p.numero_factura || p.id_pedido}</p><p class="text-xs text-gray-400">📅 ${formatFecha(p.fecha)}</p></div>
+              <div class="text-right"><span class="text-teal-600 font-bold">$${Number(p.total).toLocaleString()}</span></div>
+            </div>
+            <div class="flex gap-2 mt-3">
+              <button onclick="verDetallePedido('${p.id_pedido}')" class="flex-1 bg-gray-100 py-2 rounded-lg text-sm">Ver</button>
+              <button onclick="mostrarOpcionesImpresion('${p.id_pedido}')" class="flex-1 bg-blue-500 text-white py-2 rounded-lg text-sm">🖨️ Imprimir</button>
+            </div>
           </div>
         `).join('')}
       </div>
@@ -1034,7 +1055,7 @@
           <div class="bg-teal-50 rounded-xl p-4 mb-4"><p class="text-sm text-teal-700">🔢 Próximo número: <strong class="text-xl">${siguienteNumero}</strong></p></div>
           <div class="flex gap-2"><input type="number" id="nuevoNumeroInicial" placeholder="Nuevo número" class="flex-1 border rounded-xl p-3"><button onclick="abrirModalConfiguracionNumeracion()" class="bg-teal-600 text-white px-5 rounded-xl">Cambiar</button></div>
         </div>
-        <div class="bg-white rounded-xl p-4 shadow-sm border"><h3 class="font-bold text-lg mb-4">ℹ️ Información</h3><p>📦 ${AppState.productos.length} productos | 👥 ${AppState.clientes.length} clientes | 📋 ${AppState.pedidos.length} pedidos</p></div>
+        <div class="bg-white rounded-xl p-4 shadow-sm border"><h3 class="font-bold text-lg mb-4">ℹ️ Información</h3><p>📦 ${AppState.productos.length} productos | 👥 ${AppState.clientes.length} clientes | 📋 ${AppState.pedidos.length} pedidos totales</p></div>
       </div>
     `;
   }
@@ -1058,7 +1079,7 @@
     const order = AppState.pedidos.find(p => p.id_pedido === AppState.selectedOrderId);
     const detalles = AppState.detalles_pedido.filter(d => d.id_pedido === AppState.selectedOrderId);
     if (!order) return '';
-    return `<div class="fixed inset-0 bg-white z-50 flex flex-col"><div class="p-4 border-b flex justify-between"><h2 class="font-bold">Factura #${order.numero_factura || order.id_pedido}</h2><button onclick="closeOrderDetail()" class="text-2xl">✕</button></div><div class="flex-1 overflow-auto p-4"><div class="bg-gray-50 p-4 rounded-xl mb-4"><p class="font-bold">${order.nombre_cliente}</p><p class="text-2xl font-bold text-teal-600">$${Number(order.total).toLocaleString()}</p><p>${formatFecha(order.fecha)}</p></div>${detalles.map(d => `<div class="flex justify-between py-2 border-b"><div>${d.nombre_producto}<br><span class="text-xs">${d.cantidad} x $${Number(d.precio_unitario).toLocaleString()}</span></div><p class="font-bold">$${Number(d.subtotal).toLocaleString()}</p></div>`).join('')}</div><div class="p-4 border-t"><button onclick="mostrarOpcionesImpresion('${order.id_pedido}')" class="w-full bg-blue-500 text-white py-3 rounded-xl font-bold">🖨️ Imprimir</button></div></div>`;
+    return `<div class="fixed inset-0 bg-white z-50 flex flex-col"><div class="p-4 border-b flex justify-between"><h2 class="font-bold">Factura #${order.numero_factura || order.id_pedido}</h2><button onclick="closeOrderDetail()" class="text-2xl">✕</button></div><div class="flex-1 overflow-auto p-4"><div class="bg-gray-50 p-4 rounded-xl mb-4"><p class="font-bold">${order.nombre_cliente}</p><p class="text-2xl font-bold text-teal-600">$${Number(order.total).toLocaleString()}</p><p>${formatFecha(order.fecha)}</p><p>Estado: ${order.estado}</p></div>${detalles.map(d => `<div class="flex justify-between py-2 border-b"><div>${d.nombre_producto}<br><span class="text-xs">${d.cantidad} x $${Number(d.precio_unitario).toLocaleString()}</span></div><p class="font-bold">$${Number(d.subtotal).toLocaleString()}</p></div>`).join('')}</div><div class="p-4 border-t"><button onclick="mostrarOpcionesImpresion('${order.id_pedido}')" class="w-full bg-blue-500 text-white py-3 rounded-xl font-bold">🖨️ Imprimir</button></div></div>`;
   }
 
   function renderClientHistoryModal() {
@@ -1211,7 +1232,6 @@
   window.selectClientFromDropdown = (id, nombre, telefono) => { AppState.selectedClient = { id, nombre, telefono }; AppState.selectedClientName = nombre; render(); };
   window.selectProductFromDropdown = (code) => { AppState.selectedProduct = AppState.productos.find(p => p.código === code); AppState.numValue = '0'; render(); };
   window.closeQuantityModal = () => { AppState.selectedProduct = null; render(); };
-  window.updateEditCartPrice = (index, newPrice) => { let price = parseFloat(newPrice); if (price > 0) AppState.editCart[index].unitPrice = price; render(); };
   
   function setupClientSearchEvents() {
     const input = document.getElementById('clientSearchInputVender');
